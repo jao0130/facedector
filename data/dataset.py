@@ -50,14 +50,17 @@ class PUREFaceDataset:
             if label_file.name == "stats.json":
                 continue
 
-            session_id = label_file.stem
-            subject, session = session_id.rsplit("_", 1)
+            session_id = label_file.stem  # e.g., "01-01"
 
             with open(label_file, 'r') as f:
                 session_labels = json.load(f)
 
             for image_name, label_data in session_labels.items():
-                image_path = self.pure_dir / subject / session / image_name
+                # PURE structure: XX-YY/XX-YY/*.png
+                image_path = self.pure_dir / session_id / session_id / image_name
+                if not image_path.exists():
+                    # Fallback: try direct path
+                    image_path = self.pure_dir / session_id / image_name
                 if image_path.exists():
                     samples.append({
                         'image_path': str(image_path),

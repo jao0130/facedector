@@ -50,11 +50,13 @@ def wing_loss(
         Loss scalar
     """
     diff = tf.abs(pred - target)
-    c = w * (1.0 - tf.math.log(1.0 + w / epsilon))
+    # Add numerical stability with epsilon protection
+    epsilon_safe = tf.maximum(epsilon, 1e-7)
+    c = w * (1.0 - tf.math.log(tf.maximum(1.0 + w / epsilon_safe, 1e-7)))
 
     loss = tf.where(
         diff < w,
-        w * tf.math.log(1.0 + diff / epsilon),
+        w * tf.math.log(tf.maximum(1.0 + diff / epsilon_safe, 1e-7)),
         diff - c,
     )
     return tf.reduce_mean(loss)

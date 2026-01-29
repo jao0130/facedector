@@ -9,7 +9,6 @@ from tensorflow.keras import layers
 from typing import Dict, Optional, Tuple
 
 from .backbone import create_mobilenetv2_backbone, FeaturePyramidNeck
-from .detector import DetectionHead, LandmarkHead, AnchorGenerator
 
 
 class FaceDetector(keras.Model):
@@ -46,24 +45,11 @@ class FaceDetector(keras.Model):
         # Feature pyramid neck
         self.fpn = FeaturePyramidNeck(out_channels=64)
 
-        # Detection heads
-        self.detection_head = DetectionHead(num_anchors=num_anchors)
-        self.landmark_head = LandmarkHead(
-            num_landmarks=num_landmarks,
-            num_anchors=num_anchors,
-        )
-
         # Global feature aggregation for single face detection
         self.global_pool = layers.GlobalAveragePooling2D()
         self.fc_bbox = layers.Dense(4)  # Direct bbox regression
         self.fc_landmarks = layers.Dense(num_landmarks * 2)  # Direct landmark regression
         self.fc_confidence = layers.Dense(1)  # Face confidence
-
-        # Anchor generator for SSD-style detection (backup)
-        self.anchor_generator = AnchorGenerator(
-            scales=[0.1, 0.2, 0.4, 0.6, 0.8, 1.0],
-            aspect_ratios=[1.0],
-        )
 
     def call(self, inputs, training=None):
         """

@@ -12,6 +12,7 @@ import yaml
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
+from tqdm import tqdm
 
 from data.dataset import create_datasets_from_config, PUREFaceDataset
 from data.augmentation import create_augmentation_from_config
@@ -74,18 +75,26 @@ class FaceDetectorTrainer:
             'lr': [],
         }
 
-    def setup_optimizer(self):
-        """Setup optimizer with learning rate schedule."""
+    def setup_optimizer(self, steps_per_epoch: int = 100):
+        """Setup optimizer with learning rate schedule.
+
+        Args:
+            steps_per_epoch: Number of training steps per epoch
+        """
         initial_lr = self.training_config.get('initial_learning_rate', 0.001)
         min_lr = self.training_config.get('min_learning_rate', 0.00001)
         epochs = self.training_config.get('epochs', 100)
         warmup_epochs = self.training_config.get('warmup_epochs', 5)
 
+        # Calculate total steps (not epochs)
+        total_steps = epochs * steps_per_epoch
+        warmup_steps = warmup_epochs * steps_per_epoch
+
         # Cosine decay with warmup
         self.lr_schedule = WarmupCosineDecay(
             initial_learning_rate=initial_lr,
-            decay_steps=epochs,
-            warmup_steps=warmup_epochs,
+            decay_steps=total_steps,
+            warmup_steps=warmup_steps,
             alpha=min_lr / initial_lr,
         )
 
@@ -228,6 +237,11 @@ class FaceDetectorTrainer:
         if epochs is None:
             epochs = self.training_config.get('epochs', 100)
 
+        # Calculate steps per epoch and reinitialize optimizer with correct schedule
+        steps_per_epoch = sum(1 for _ in train_dataset)
+        self.setup_optimizer(steps_per_epoch=steps_per_epoch)
+        print(f"Steps per epoch: {steps_per_epoch}")
+
         # Setup directories
         checkpoint_dir = Path(self.callback_config.get('checkpoint_dir', 'checkpoints'))
         log_dir = Path(self.callback_config.get('log_dir', 'logs'))
@@ -243,7 +257,7 @@ class FaceDetectorTrainer:
         print(f"Checkpoints will be saved to: {checkpoint_dir}")
 
         for epoch in range(epochs):
-            print(f"\nEpoch {epoch + 1}/{epochs}")
+            print(f"\n==== Epoch {epoch + 1}/{epochs} ====")
 
             # Reset metrics
             self.train_loss_tracker.reset_state()
@@ -255,24 +269,39 @@ class FaceDetectorTrainer:
             self.val_iou_metric.reset_state()
             self.val_nme_metric.reset_state()
 
-            # Training
-            for step, batch in enumerate(train_dataset):
+            # Training with tqdm progress bar
+            tbar = tqdm(train_dataset, ncols=150, desc=f"Train Epoch {epoch + 1}")
+            for step, batch in enumerate(tbar):
                 images, gt_bbox, gt_landmarks = batch
-                self.train_step(images, gt_bbox, gt_landmarks)
+                result = self.train_step(images, gt_bbox, gt_landmarks)
 
-                if step % 50 == 0:
-                    print(
-                        f"  Step {step}: loss={self.train_loss_tracker.result():.4f}, "
-                        f"iou={self.train_iou_metric.result():.4f}"
-                    )
+                # Update progress bar with current metrics
+                tbar.set_postfix(
+                    loss=f"{float(self.train_loss_tracker.result()):.4f}",
+                    bbox=f"{float(self.train_bbox_loss_tracker.result()):.4f}",
+                    lmk=f"{float(self.train_landmark_loss_tracker.result()):.4f}",
+                    iou=f"{float(self.train_iou_metric.result()):.4f}",
+                )
 
-            # Validation
-            for batch in val_dataset:
+            # Validation with tqdm progress bar
+            vbar = tqdm(val_dataset, ncols=150, desc="Validation")
+            for batch in vbar:
                 images, gt_bbox, gt_landmarks = batch
                 self.val_step(images, gt_bbox, gt_landmarks)
 
+                # Update validation progress bar
+                vbar.set_postfix(
+                    val_loss=f"{float(self.val_loss_tracker.result()):.4f}",
+                    val_iou=f"{float(self.val_iou_metric.result()):.4f}",
+                    val_nme=f"{float(self.val_nme_metric.result()):.4f}",
+                )
+
             # Get current learning rate
-            current_lr = float(self.optimizer.learning_rate(self.optimizer.iterations))
+            lr = self.optimizer.learning_rate
+            if callable(lr):
+                current_lr = float(lr(self.optimizer.iterations))
+            else:
+                current_lr = float(lr)
 
             # Log metrics
             train_loss = float(self.train_loss_tracker.result())
@@ -294,13 +323,13 @@ class FaceDetectorTrainer:
             self.history['val_nme'].append(val_nme)
             self.history['lr'].append(current_lr)
 
-            print(
-                f"  Train - loss: {train_loss:.4f}, bbox: {train_bbox_loss:.4f}, "
-                f"lmk: {train_landmark_loss:.4f}, iou: {train_iou:.4f}, nme: {train_nme:.4f}"
-            )
-            print(
-                f"  Val   - loss: {val_loss:.4f}, iou: {val_iou:.4f}, nme: {val_nme:.4f}, lr: {current_lr:.6f}"
-            )
+            print(f"\n{'='*60}")
+            print(f"Epoch {epoch + 1}/{epochs} Summary:")
+            print(f"  Train - loss: {train_loss:.4f}, bbox: {train_bbox_loss:.4f}, "
+                  f"lmk: {train_landmark_loss:.4f}, iou: {train_iou:.4f}, nme: {train_nme:.4f}")
+            print(f"  Val   - loss: {val_loss:.4f}, iou: {val_iou:.4f}, nme: {val_nme:.4f}")
+            print(f"  LR: {current_lr:.6f}")
+            print(f"{'='*60}")
 
             # Save best model
             if val_loss < best_val_loss:
@@ -360,12 +389,19 @@ class WarmupCosineDecay(keras.optimizers.schedules.LearningRateSchedule):
         warmup_steps = tf.cast(self.warmup_steps, tf.float32)
         decay_steps = tf.cast(self.decay_steps, tf.float32)
 
-        # Warmup phase
-        warmup_lr = self.initial_learning_rate * (step / warmup_steps)
+        # Handle edge case: no warmup
+        if self.warmup_steps == 0:
+            decay_step = step
+            cosine_decay = 0.5 * (1 + tf.cos(np.pi * decay_step / (decay_steps + 1e-8)))
+            decayed_lr = (1 - self.alpha) * cosine_decay + self.alpha
+            return self.initial_learning_rate * decayed_lr
+
+        # Warmup phase (add epsilon to prevent division by zero)
+        warmup_lr = self.initial_learning_rate * (step / (warmup_steps + 1e-8))
 
         # Cosine decay phase
-        decay_step = step - warmup_steps
-        cosine_decay = 0.5 * (1 + tf.cos(np.pi * decay_step / decay_steps))
+        decay_step = tf.maximum(step - warmup_steps, 0.0)
+        cosine_decay = 0.5 * (1 + tf.cos(np.pi * decay_step / (decay_steps - warmup_steps + 1e-8)))
         decayed_lr = (1 - self.alpha) * cosine_decay + self.alpha
         decay_lr = self.initial_learning_rate * decayed_lr
 
@@ -386,7 +422,24 @@ def load_config(config_path: str) -> Dict:
         return yaml.safe_load(f)
 
 
+def setup_gpu():
+    """Configure GPU memory growth to avoid OOM errors."""
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            print(f"Found {len(gpus)} GPU(s), memory growth enabled")
+        except RuntimeError as e:
+            print(f"GPU configuration error: {e}")
+    else:
+        print("No GPU found, using CPU")
+
+
 def main():
+    # Setup GPU before any TensorFlow operations
+    setup_gpu()
+
     parser = argparse.ArgumentParser(description='Train face detection model')
     parser.add_argument(
         '--config',

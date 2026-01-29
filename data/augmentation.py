@@ -229,34 +229,16 @@ class FaceAugmentation:
         bbox: tf.Tensor,
         landmarks: tf.Tensor,
     ) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
-        """Random scaling with center crop/pad."""
+        """Random scaling with center crop/pad.
+
+        When scale > 1: image is enlarged then center-cropped
+        When scale < 1: image is shrunk then center-padded
+        """
         scale = tf.random.uniform(
             [],
             minval=self.scale_range[0],
             maxval=self.scale_range[1],
         )
-
-        # Scale around center
-        center_x, center_y = 0.5, 0.5
-
-        # Scale bbox
-        bbox_center_x = (bbox[0] + bbox[2]) / 2
-        bbox_center_y = (bbox[1] + bbox[3]) / 2
-        bbox_w = bbox[2] - bbox[0]
-        bbox_h = bbox[3] - bbox[1]
-
-        new_bbox_w = bbox_w * scale
-        new_bbox_h = bbox_h * scale
-        new_bbox = tf.stack([
-            bbox_center_x - new_bbox_w / 2,
-            bbox_center_y - new_bbox_h / 2,
-            bbox_center_x + new_bbox_w / 2,
-            bbox_center_y + new_bbox_h / 2,
-        ])
-
-        # Scale landmarks relative to center
-        scaled_landmarks = center_x + (landmarks - center_x) * scale
-        scaled_landmarks = tf.clip_by_value(scaled_landmarks, 0.0, 1.0)
 
         # Scale image
         shape = tf.shape(image)
@@ -269,12 +251,29 @@ class FaceAugmentation:
             scaled_image, shape[0], shape[1]
         )
 
-        # Adjust bbox and landmarks for crop/pad offset
-        offset = (1.0 - scale) / 2
-        new_bbox = tf.clip_by_value(new_bbox + offset, 0.0, 1.0)
-        scaled_landmarks = tf.clip_by_value(scaled_landmarks + offset, 0.0, 1.0)
+        # Calculate coordinate transformation
+        # After resize_with_crop_or_pad:
+        # - If scale > 1 (enlarged): center crop removes (scale-1)/2 from each side
+        #   new_coord = (old_coord - (1 - 1/scale)/2) * scale = old_coord * scale - (scale-1)/2
+        # - If scale < 1 (shrunk): center pad adds (1-scale)/2 to each side
+        #   new_coord = old_coord * scale + (1-scale)/2
 
-        return scaled_image, new_bbox, scaled_landmarks
+        offset = (1.0 - scale) / 2.0
+
+        # Transform bbox
+        new_bbox = tf.stack([
+            bbox[0] * scale + offset,
+            bbox[1] * scale + offset,
+            bbox[2] * scale + offset,
+            bbox[3] * scale + offset,
+        ])
+        new_bbox = tf.clip_by_value(new_bbox, 0.0, 1.0)
+
+        # Transform landmarks
+        new_landmarks = landmarks * scale + offset
+        new_landmarks = tf.clip_by_value(new_landmarks, 0.0, 1.0)
+
+        return scaled_image, new_bbox, new_landmarks
 
     def _color_augmentation(self, image: tf.Tensor) -> tf.Tensor:
         """Apply random color augmentation."""

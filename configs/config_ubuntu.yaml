@@ -17,7 +17,7 @@ model:
 
 # Training hyperparameters
 training:
-  batch_size: 32
+  batch_size: 16  # Reduced for ~80% GPU memory usage
   epochs: 100
   initial_learning_rate: 0.001
   min_learning_rate: 0.00001

@@ -422,14 +422,22 @@ def load_config(config_path: str) -> Dict:
         return yaml.safe_load(f)
 
 
-def setup_gpu():
-    """Configure GPU memory growth to avoid OOM errors."""
+def setup_gpu(memory_limit_mb: int = 13000):
+    """Configure GPU memory limit to avoid overloading.
+
+    Args:
+        memory_limit_mb: Maximum GPU memory to use in MB (default: 13000 = ~80% of 16GB)
+    """
     gpus = tf.config.list_physical_devices('GPU')
     if gpus:
         try:
             for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-            print(f"Found {len(gpus)} GPU(s), memory growth enabled")
+                # Limit GPU memory to specified amount
+                tf.config.set_logical_device_configuration(
+                    gpu,
+                    [tf.config.LogicalDeviceConfiguration(memory_limit=memory_limit_mb)]
+                )
+            print(f"Found {len(gpus)} GPU(s), memory limited to {memory_limit_mb}MB (~80% of 16GB)")
         except RuntimeError as e:
             print(f"GPU configuration error: {e}")
     else:

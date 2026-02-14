@@ -14,7 +14,7 @@ import tensorflow as tf
 from tensorflow import keras
 from tqdm import tqdm
 
-from data.dataset import create_datasets_from_config, PUREFaceDataset
+from data.dataset import create_datasets_from_config
 from data.augmentation import create_augmentation_from_config
 from models.face_detector import FaceDetector, create_face_detector
 from utils.losses import smooth_l1_loss, wing_loss, giou_loss

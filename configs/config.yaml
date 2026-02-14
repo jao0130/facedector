@@ -48,6 +48,8 @@
 data:
   pure_dir: "D:/PURE"
   labels_dir: "D:/PURE_labels"
+  wider_face_dir: "D:/WIDER_FACE/WIDER_train/images"
+  wider_face_labels_dir: "D:/WIDER_FACE_labels"
   train_split: 0.8
   val_split: 0.2
 

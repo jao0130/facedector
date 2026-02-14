@@ -28,9 +28,9 @@ def compute_iou(box1: tf.Tensor, box2: tf.Tensor) -> tf.Tensor:
     inter_h = tf.maximum(0.0, inter_y_max - inter_y_min)
     inter_area = inter_w * inter_h
 
-    # Union
-    area1 = (box1[:, 2] - box1[:, 0]) * (box1[:, 3] - box1[:, 1])
-    area2 = (box2[:, 2] - box2[:, 0]) * (box2[:, 3] - box2[:, 1])
+    # Union (use tf.maximum to protect against invalid boxes)
+    area1 = tf.maximum(0.0, box1[:, 2] - box1[:, 0]) * tf.maximum(0.0, box1[:, 3] - box1[:, 1])
+    area2 = tf.maximum(0.0, box2[:, 2] - box2[:, 0]) * tf.maximum(0.0, box2[:, 3] - box2[:, 1])
     union_area = area1 + area2 - inter_area
 
     return inter_area / (union_area + 1e-7)

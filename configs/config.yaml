@@ -1,4 +1,48 @@
-# Face Detection Training Configuration
+# ============================================================================
+# Face Detection 輕量級臉部偵測專案 — 訓練配置 (Windows)
+# ============================================================================
+#
+# 專案功能:
+#   本專案是一套完整的臉部偵測 pipeline，涵蓋從資料標註、模型訓練、
+#   推理測試到模型導出的所有環節。模型架構基於 MobileNetV2 + FPN，
+#   專為邊緣裝置（手機、瀏覽器）設計，同時輸出臉部邊界框與 5 點關鍵點。
+#
+# 可執行腳本:
+#
+#   1. 標籤生成 — data/generate_labels.py
+#      用 MediaPipe 自動產生 PURE 資料集的臉部標籤（bbox + 5 landmarks）
+#      > python data/generate_labels.py --pure_dir D:/PURE --output_dir D:/PURE_labels
+#
+#   2. 模型訓練 — train.py
+#      以 PURE 資料集訓練臉部偵測模型，支援斷點續訓、early stopping、
+#      學習率排程（warmup + cosine decay）、資料增強
+#      > python train.py --config configs/config.yaml
+#      > python train.py --config configs/config.yaml --resume checkpoints/best_model.weights.h5
+#
+#   3. 單筆推理 — inference.py
+#      對單張影像或影片執行推理，繪製 bbox、landmarks、confidence
+#      > python inference.py --model checkpoints/best_model.weights.h5 --config configs/config.yaml --input test.jpg
+#      > python inference.py --model checkpoints/best_model.weights.h5 --config configs/config.yaml --input video.mp4 --no-show
+#
+#   4. UBFC 測試集預處理 — scripts/preprocess_ubfc.py
+#      將 UBFC-rPPG 資料集的 raw AVI 轉為 MJPEG 格式（OpenCV 相容）
+#      > python scripts/preprocess_ubfc.py --ubfc_dir /mnt/d/UBFC/DATASET_2 --output_dir /mnt/d/UBFC_processed
+#
+#   5. UBFC 批次推理 — scripts/batch_inference_ubfc.py
+#      對全部 UBFC subjects 執行推理，輸出標註影片與統計 JSON
+#      > python scripts/batch_inference_ubfc.py --ubfc_dir /mnt/d/UBFC_processed --model checkpoints/best_model.weights.h5 --config configs/config.yaml --output_dir results/ubfc
+#
+#   6. 模型導出 — export/export_tflite.py, export/export_tfjs.py
+#      將訓練好的模型轉為 TFLite（手機端）或 TensorFlow.js（網頁端）
+#      > python export/export_tflite.py --model checkpoints/best_model.weights.h5 --config configs/config.yaml --output export/face_detector.tflite
+#      > python export/export_tfjs.py --model checkpoints/best_model.weights.h5 --config configs/config.yaml --output export/tfjs_model
+#
+# 模型輸出:
+#   - bbox [B, 4]       — 臉部邊界框 (x_min, y_min, x_max, y_max)，正規化 0~1
+#   - landmarks [B, 5, 2] — 左眼、右眼、鼻尖、左嘴角、右嘴角
+#   - confidence [B, 1]  — 臉部存在信心分數
+#
+# ============================================================================
 
 # Data paths
 data:

@@ -24,10 +24,11 @@ class FaceDetector(keras.Model):
 
     def __init__(
         self,
-        input_size: int = 256,
+        input_size: int = 224,
         backbone_alpha: float = 0.5,
         num_landmarks: int = 5,
         num_anchors: int = 6,
+        pretrained: bool = True,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -40,6 +41,7 @@ class FaceDetector(keras.Model):
         self.backbone = create_mobilenetv2_backbone(
             input_shape=(input_size, input_size, 3),
             alpha=backbone_alpha,
+            pretrained=pretrained,
         )
 
         # Feature pyramid neck
@@ -78,10 +80,15 @@ class FaceDetector(keras.Model):
         # Global pooling for single-face prediction
         global_feature = self.global_pool(main_feature)
 
-        # Predict bbox
+        # Predict bbox as (cx, cy, w, h) then convert to (x_min, y_min, x_max, y_max)
         bbox_raw = self.fc_bbox(global_feature)
-        # Apply sigmoid to constrain to [0, 1]
-        bbox = tf.sigmoid(bbox_raw)
+        bbox_cwh = tf.sigmoid(bbox_raw)  # [cx, cy, w, h] all in [0, 1]
+        cx = bbox_cwh[:, 0:1]
+        cy = bbox_cwh[:, 1:2]
+        w = bbox_cwh[:, 2:3]
+        h = bbox_cwh[:, 3:4]
+        bbox = tf.concat([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], axis=-1)
+        bbox = tf.clip_by_value(bbox, 0.0, 1.0)
 
         # Predict landmarks
         landmarks_raw = self.fc_landmarks(global_feature)
@@ -217,15 +224,21 @@ def wing_loss(pred: tf.Tensor, target: tf.Tensor, w: float = 10.0, epsilon: floa
     return tf.reduce_mean(loss)
 
 
-def create_face_detector(config: Dict) -> FaceDetector:
-    """Create face detector model from config."""
+def create_face_detector(config: Dict, pretrained: bool = True) -> FaceDetector:
+    """Create face detector model from config.
+
+    Args:
+        config: Model configuration dictionary
+        pretrained: Whether to load ImageNet backbone weights (False for inference with custom weights)
+    """
     model_config = config.get('model', {})
 
     model = FaceDetector(
-        input_size=model_config.get('input_size', 256),
+        input_size=model_config.get('input_size', 224),
         backbone_alpha=model_config.get('backbone_alpha', 0.5),
         num_landmarks=model_config.get('num_landmarks', 5),
         num_anchors=model_config.get('num_anchors', 6),
+        pretrained=pretrained,
     )
 
     return model
@@ -284,7 +297,14 @@ class FaceDetectorLite(keras.Model):
     def call(self, inputs, training=None):
         features = self.features(inputs, training=training)
 
-        bbox = tf.sigmoid(self.fc_bbox(features))
+        bbox_cwh = tf.sigmoid(self.fc_bbox(features))  # [cx, cy, w, h]
+        cx = bbox_cwh[:, 0:1]
+        cy = bbox_cwh[:, 1:2]
+        w = bbox_cwh[:, 2:3]
+        h = bbox_cwh[:, 3:4]
+        bbox = tf.concat([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], axis=-1)
+        bbox = tf.clip_by_value(bbox, 0.0, 1.0)
+
         landmarks = tf.sigmoid(self.fc_landmarks(features))
         landmarks = tf.reshape(landmarks, [-1, self.num_landmarks, 2])
         confidence = tf.sigmoid(self.fc_confidence(features))

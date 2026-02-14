@@ -4,6 +4,15 @@
 
 基於 MobileNetV2 + FPN 的輕量級臉部偵測模型，支援邊界框偵測和 5 點臉部關鍵點定位。
 
+## 開發環境
+
+- **作業系統**: Ubuntu (WSL)
+- **硬體**: 詳見使用者層級設定
+
+## 開發規則
+
+- **所有訓練、測試、驗證皆由使用者本人執行**，Claude 不主動執行訓練/測試/驗證指令，僅負責撰寫與修改程式碼
+
 ## 目錄結構
 
 ```
@@ -34,7 +43,7 @@ facedector/
 ## 模型架構
 
 ```
-Input [B, 256, 256, 3]
+Input [B, 224, 224, 3]
     ↓
 MobileNetV2 Backbone (α=0.5)
     ↓
@@ -92,7 +101,7 @@ python export/export_tfjs.py --model checkpoints/best_model.weights.h5 --config 
 
 | 參數 | 預設值 | 說明 |
 |------|--------|------|
-| `model.input_size` | 256 | 輸入影像尺寸 |
+| `model.input_size` | 224 | 輸入影像尺寸 |
 | `model.backbone_alpha` | 0.5 | MobileNetV2 寬度因子 |
 | `training.batch_size` | 32 | 批次大小 |
 | `training.epochs` | 100 | 訓練輪數 |

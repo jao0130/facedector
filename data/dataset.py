@@ -22,7 +22,7 @@ class PUREFaceDataset:
         self,
         pure_dir: str,
         labels_dir: str,
-        input_size: int = 256,
+        input_size: int = 224,
         augmentation: Optional[FaceAugmentation] = None,
     ):
         """
@@ -192,7 +192,7 @@ def create_datasets_from_config(
     dataset = PUREFaceDataset(
         pure_dir=data_config.get('pure_dir', 'D:/PURE'),
         labels_dir=data_config.get('labels_dir', 'D:/PURE_labels'),
-        input_size=model_config.get('input_size', 256),
+        input_size=model_config.get('input_size', 224),
         augmentation=augmentation,
     )
 
@@ -214,7 +214,7 @@ def create_datasets_from_config(
     val_dataset_instance = PUREFaceDataset(
         pure_dir=data_config.get('pure_dir', 'D:/PURE'),
         labels_dir=data_config.get('labels_dir', 'D:/PURE_labels'),
-        input_size=model_config.get('input_size', 256),
+        input_size=model_config.get('input_size', 224),
         augmentation=None,  # No augmentation for validation
     )
 

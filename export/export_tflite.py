@@ -34,7 +34,7 @@ def export_to_tflite(
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
 
-    input_size = config.get('model', {}).get('input_size', 256)
+    input_size = config.get('model', {}).get('input_size', 224)
 
     # Create and load model
     model = create_face_detector(config)
@@ -102,7 +102,7 @@ def export_to_tflite(
 
 def verify_tflite_model(
     tflite_path: str,
-    input_size: int = 256,
+    input_size: int = 224,
 ):
     """
     Verify TFLite model by running inference.
@@ -191,7 +191,7 @@ def main():
     if args.verify:
         with open(args.config, 'r') as f:
             config = yaml.safe_load(f)
-        input_size = config.get('model', {}).get('input_size', 256)
+        input_size = config.get('model', {}).get('input_size', 224)
         verify_tflite_model(str(output_path), input_size)
 
 

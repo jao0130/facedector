@@ -8,9 +8,10 @@ from tensorflow.keras import layers
 
 
 def create_mobilenetv2_backbone(
-    input_shape: tuple = (256, 256, 3),
+    input_shape: tuple = (224, 224, 3),
     alpha: float = 0.5,
     include_top: bool = False,
+    pretrained: bool = True,
 ) -> keras.Model:
     """
     Create MobileNetV2 backbone with configurable width multiplier.
@@ -19,6 +20,7 @@ def create_mobilenetv2_backbone(
         input_shape: Input image shape (H, W, C)
         alpha: Width multiplier (0.25, 0.5, 0.75, 1.0)
         include_top: Whether to include classification head
+        pretrained: Whether to load ImageNet weights (set False for inference with custom weights)
 
     Returns:
         MobileNetV2 backbone model outputting feature maps
@@ -27,7 +29,7 @@ def create_mobilenetv2_backbone(
         input_shape=input_shape,
         alpha=alpha,
         include_top=include_top,
-        weights='imagenet',
+        weights='imagenet' if pretrained else None,
     )
 
     # Extract multi-scale feature maps

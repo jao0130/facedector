@@ -299,7 +299,7 @@ def create_detection_video(
     model,
     image_paths: List[str],
     output_path: str,
-    input_size: int = 256,
+    input_size: int = 224,
     fps: int = 30,
 ):
     """

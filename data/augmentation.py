@@ -140,8 +140,6 @@ class FaceAugmentation:
         angle_rad = angle * np.pi / 180.0
 
         # Get image dimensions
-        shape = tf.cast(tf.shape(image), tf.float32)
-        height, width = shape[0], shape[1]
         center_x, center_y = 0.5, 0.5
 
         # Rotate image
@@ -164,11 +162,21 @@ class FaceAugmentation:
         ])
         rotated_bbox = tf.clip_by_value(rotated_bbox, 0.0, 1.0)
 
+        # Validate rotated bbox: if too small or degenerate, skip rotation
+        bbox_w = rotated_bbox[2] - rotated_bbox[0]
+        bbox_h = rotated_bbox[3] - rotated_bbox[1]
+        is_valid = tf.logical_and(bbox_w > 0.05, bbox_h > 0.05)
+
         # Rotate landmarks
         rotated_landmarks = self._rotate_points(landmarks, -angle_rad, center_x, center_y)
         rotated_landmarks = tf.clip_by_value(rotated_landmarks, 0.0, 1.0)
 
-        return rotated_image, rotated_bbox, rotated_landmarks
+        # Return original if rotated bbox is invalid
+        final_image = tf.cond(is_valid, lambda: rotated_image, lambda: image)
+        final_bbox = tf.cond(is_valid, lambda: rotated_bbox, lambda: bbox)
+        final_landmarks = tf.cond(is_valid, lambda: rotated_landmarks, lambda: landmarks)
+
+        return final_image, final_bbox, final_landmarks
 
     def _rotate_image(self, image: tf.Tensor, angle_rad: tf.Tensor) -> tf.Tensor:
         """Rotate image using tf.raw_ops."""

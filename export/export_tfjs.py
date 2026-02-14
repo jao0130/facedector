@@ -31,11 +31,13 @@ def export_to_tfjs(
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
 
-    input_size = config.get('model', {}).get('input_size', 256)
+    input_size = config.get('model', {}).get('input_size', 224)
 
-    # Create and load model
-    model = create_face_detector(config)
-    model.build((None, input_size, input_size, 3))
+    # Create and load model (pretrained=False since we load trained weights)
+    model = create_face_detector(config, pretrained=False)
+    # Forward pass to build all layers including FPN
+    dummy_input = tf.zeros((1, input_size, input_size, 3))
+    model(dummy_input, training=False)
     model.load_weights(model_path)
 
     print(f"Model loaded from {model_path}")
@@ -100,153 +102,312 @@ def export_to_tfjs(
 
 
 def create_demo_html(output_dir: Path, input_size: int):
-    """Create a simple HTML demo for testing the TFJS model."""
+    """Create a production-ready HTML demo for testing the TFJS model."""
     demo_html = f'''<!DOCTYPE html>
-<html>
+<html lang="zh-TW">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Face Detection Demo</title>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.0.0"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0"></script>
     <style>
-        body {{ font-family: Arial, sans-serif; margin: 20px; }}
-        #canvas {{ border: 1px solid #ccc; }}
-        #video {{ display: none; }}
-        .controls {{ margin: 10px 0; }}
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ font-family: system-ui, sans-serif; background: #111; color: #eee; }}
+
+        .container {{
+            max-width: 720px;
+            margin: 0 auto;
+            padding: 16px;
+        }}
+
+        h1 {{
+            font-size: 20px;
+            font-weight: 600;
+            margin-bottom: 12px;
+        }}
+
+        .video-wrap {{
+            position: relative;
+            background: #222;
+            border-radius: 8px;
+            overflow: hidden;
+            aspect-ratio: 4 / 3;
+        }}
+
+        #canvas {{
+            display: block;
+            width: 100%;
+            height: 100%;
+        }}
+
+        #video {{
+            display: none;
+        }}
+
+        .overlay {{
+            position: absolute;
+            top: 12px;
+            left: 12px;
+            font-size: 13px;
+            font-family: monospace;
+            background: rgba(0, 0, 0, 0.6);
+            padding: 4px 8px;
+            border-radius: 4px;
+        }}
+
+        #status {{
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 15px;
+            text-align: center;
+            color: #aaa;
+        }}
+
+        .controls {{
+            display: flex;
+            gap: 12px;
+            margin-top: 12px;
+            align-items: center;
+        }}
+
+        button {{
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            min-height: 44px;
+            transition: opacity 0.2s;
+        }}
+
+        button:disabled {{
+            opacity: 0.4;
+            cursor: not-allowed;
+        }}
+
+        #startBtn {{
+            background: #2563eb;
+            color: white;
+        }}
+
+        #stopBtn {{
+            background: #dc2626;
+            color: white;
+        }}
+
+        .threshold-group {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-left: auto;
+            font-size: 13px;
+        }}
+
+        #thresholdRange {{
+            width: 100px;
+        }}
+
+        .stats {{
+            display: flex;
+            gap: 16px;
+            margin-top: 12px;
+            font-size: 13px;
+            font-family: monospace;
+            color: #aaa;
+        }}
     </style>
 </head>
 <body>
-    <h1>Face Detection Demo</h1>
-    <div class="controls">
-        <button id="startBtn">Start Camera</button>
-        <button id="stopBtn" disabled>Stop Camera</button>
+    <div class="container">
+        <h1>Face Detection Demo</h1>
+
+        <div class="video-wrap">
+            <canvas id="canvas" width="640" height="480"></canvas>
+            <video id="video" playsinline autoplay muted></video>
+            <div id="status">Loading model...</div>
+        </div>
+
+        <div class="controls">
+            <button id="startBtn" disabled>Start Camera</button>
+            <button id="stopBtn" disabled>Stop</button>
+            <div class="threshold-group">
+                <label for="thresholdRange">Threshold</label>
+                <input type="range" id="thresholdRange" min="0" max="100" value="50">
+                <span id="thresholdVal">0.50</span>
+            </div>
+        </div>
+
+        <div class="stats">
+            <span id="fpsInfo">FPS: -</span>
+            <span id="inferInfo">Inference: -</span>
+            <span id="confInfo">Confidence: -</span>
+            <span id="backendInfo">Backend: -</span>
+        </div>
     </div>
-    <canvas id="canvas" width="640" height="480"></canvas>
-    <video id="video" width="640" height="480" autoplay></video>
-    <p id="fps">FPS: -</p>
 
     <script>
         const MODEL_INPUT_SIZE = {input_size};
+        const LANDMARK_COLORS = ['#3b82f6', '#3b82f6', '#22c55e', '#ef4444', '#ef4444'];
+        const LANDMARK_NAMES = ['L-Eye', 'R-Eye', 'Nose', 'L-Mouth', 'R-Mouth'];
+
         let model = null;
         let isRunning = false;
-        let lastTime = 0;
+        let confidenceThreshold = 0.5;
 
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        // --- Model ---
         async function loadModel() {{
-            console.log('Loading model...');
+            await tf.setBackend('webgl');
+            await tf.ready();
+            document.getElementById('backendInfo').textContent = 'Backend: ' + tf.getBackend();
+
             model = await tf.loadGraphModel('model.json');
-            console.log('Model loaded');
+
+            // Warmup: first inference is slow due to shader compilation
+            const warmup = tf.zeros([1, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, 3]);
+            await model.executeAsync(warmup);
+            warmup.dispose();
+
+            document.getElementById('status').textContent = 'Model ready — click Start Camera';
+            document.getElementById('startBtn').disabled = false;
         }}
 
-        async function detect(imageData) {{
-            // Preprocess
-            const tensor = tf.browser.fromPixels(imageData)
-                .resizeBilinear([MODEL_INPUT_SIZE, MODEL_INPUT_SIZE])
-                .div(255.0)
-                .expandDims(0);
+        // --- Detection ---
+        async function detect(source) {{
+            const t0 = performance.now();
 
-            // Run inference
-            const outputs = await model.predict(tensor);
+            let bbox, landmarks, confidence;
 
-            // Parse outputs
-            const bbox = await outputs[0].data();
-            const landmarks = await outputs[1].data();
-            const confidence = await outputs[2].data();
+            const inputTensor = tf.tidy(() => {{
+                return tf.browser.fromPixels(source)
+                    .resizeBilinear([MODEL_INPUT_SIZE, MODEL_INPUT_SIZE])
+                    .div(255.0)
+                    .expandDims(0);
+            }});
 
-            tensor.dispose();
-            outputs.forEach(o => o.dispose());
+            const outputs = await model.executeAsync(inputTensor);
+            inputTensor.dispose();
 
-            return {{ bbox, landmarks, confidence: confidence[0] }};
+            // outputs is an array: [bbox, landmarks, confidence]
+            const [bboxT, landmarksT, confT] = Array.isArray(outputs) ? outputs : [outputs];
+
+            bbox = await bboxT.data();
+            landmarks = await landmarksT.data();
+            confidence = (await confT.data())[0];
+
+            bboxT.dispose();
+            landmarksT.dispose();
+            confT.dispose();
+
+            const inferMs = performance.now() - t0;
+            return {{ bbox, landmarks, confidence, inferMs }};
         }}
 
-        function drawResults(ctx, result, width, height) {{
-            const {{ bbox, landmarks, confidence }} = result;
+        // --- Drawing ---
+        function drawResults(result, w, h) {{
+            const {{ bbox, landmarks, confidence, inferMs }} = result;
 
-            // Draw bbox
-            ctx.strokeStyle = '#00ff00';
-            ctx.lineWidth = 2;
-            ctx.strokeRect(
-                bbox[0] * width,
-                bbox[1] * height,
-                (bbox[2] - bbox[0]) * width,
-                (bbox[3] - bbox[1]) * height
-            );
+            if (confidence >= confidenceThreshold) {{
+                const x1 = bbox[0] * w, y1 = bbox[1] * h;
+                const x2 = bbox[2] * w, y2 = bbox[3] * h;
 
-            // Draw landmarks
-            const colors = ['blue', 'blue', 'green', 'red', 'red'];
-            for (let i = 0; i < 5; i++) {{
-                ctx.fillStyle = colors[i];
-                ctx.beginPath();
-                ctx.arc(
-                    landmarks[i * 2] * width,
-                    landmarks[i * 2 + 1] * height,
-                    4, 0, 2 * Math.PI
-                );
-                ctx.fill();
+                // Bbox
+                ctx.strokeStyle = '#22c55e';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+
+                // Confidence label
+                ctx.fillStyle = '#22c55e';
+                ctx.font = 'bold 14px monospace';
+                ctx.fillText(confidence.toFixed(3), x1, y1 - 6);
+
+                // Landmarks
+                for (let i = 0; i < 5; i++) {{
+                    const lx = landmarks[i * 2] * w;
+                    const ly = landmarks[i * 2 + 1] * h;
+                    ctx.fillStyle = LANDMARK_COLORS[i];
+                    ctx.beginPath();
+                    ctx.arc(lx, ly, 4, 0, 2 * Math.PI);
+                    ctx.fill();
+                }}
             }}
 
-            // Draw confidence
-            ctx.fillStyle = '#00ff00';
-            ctx.font = '16px Arial';
-            ctx.fillText(
-                `Confidence: ${{confidence.toFixed(3)}}`,
-                bbox[0] * width,
-                bbox[1] * height - 10
-            );
+            // Update stats
+            const fps = 1000 / inferMs;
+            document.getElementById('fpsInfo').textContent = 'FPS: ' + fps.toFixed(1);
+            document.getElementById('inferInfo').textContent = 'Inference: ' + inferMs.toFixed(1) + 'ms';
+            document.getElementById('confInfo').textContent = 'Confidence: ' + confidence.toFixed(3);
         }}
 
+        // --- Main Loop ---
         async function processFrame() {{
             if (!isRunning) return;
 
-            const video = document.getElementById('video');
-            const canvas = document.getElementById('canvas');
-            const ctx = canvas.getContext('2d');
-
-            // Draw video frame
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-            // Run detection
-            const result = await detect(canvas);
-            drawResults(ctx, result, canvas.width, canvas.height);
-
-            // Calculate FPS
-            const now = performance.now();
-            const fps = 1000 / (now - lastTime);
-            lastTime = now;
-            document.getElementById('fps').textContent = `FPS: ${{fps.toFixed(1)}}`;
+            try {{
+                const result = await detect(canvas);
+                drawResults(result, canvas.width, canvas.height);
+            }} catch (err) {{
+                console.error('Detection error:', err);
+            }}
 
             requestAnimationFrame(processFrame);
         }}
 
+        // --- Camera ---
         async function startCamera() {{
-            const video = document.getElementById('video');
-            const stream = await navigator.mediaDevices.getUserMedia({{
-                video: {{ width: 640, height: 480 }}
-            }});
-            video.srcObject = stream;
+            try {{
+                const stream = await navigator.mediaDevices.getUserMedia({{
+                    video: {{ width: {{ ideal: 640 }}, height: {{ ideal: 480 }}, facingMode: 'user' }}
+                }});
+                video.srcObject = stream;
+                await video.play();
 
-            isRunning = true;
-            document.getElementById('startBtn').disabled = true;
-            document.getElementById('stopBtn').disabled = false;
+                canvas.width = video.videoWidth || 640;
+                canvas.height = video.videoHeight || 480;
 
-            lastTime = performance.now();
-            processFrame();
+                isRunning = true;
+                document.getElementById('status').style.display = 'none';
+                document.getElementById('startBtn').disabled = true;
+                document.getElementById('stopBtn').disabled = false;
+                processFrame();
+            }} catch (err) {{
+                document.getElementById('status').textContent = 'Camera error: ' + err.message;
+                console.error(err);
+            }}
         }}
 
         function stopCamera() {{
             isRunning = false;
-            const video = document.getElementById('video');
             const stream = video.srcObject;
-            if (stream) {{
-                stream.getTracks().forEach(track => track.stop());
-            }}
+            if (stream) stream.getTracks().forEach(t => t.stop());
+            video.srcObject = null;
+
             document.getElementById('startBtn').disabled = false;
             document.getElementById('stopBtn').disabled = true;
+            document.getElementById('status').style.display = 'block';
+            document.getElementById('status').textContent = 'Camera stopped';
         }}
 
-        // Initialize
+        // --- Events ---
         document.getElementById('startBtn').addEventListener('click', startCamera);
         document.getElementById('stopBtn').addEventListener('click', stopCamera);
+        document.getElementById('thresholdRange').addEventListener('input', (e) => {{
+            confidenceThreshold = e.target.value / 100;
+            document.getElementById('thresholdVal').textContent = confidenceThreshold.toFixed(2);
+        }});
 
-        loadModel().then(() => {{
-            console.log('Ready to start camera');
+        // --- Init ---
+        loadModel().catch(err => {{
+            document.getElementById('status').textContent = 'Failed to load model: ' + err.message;
+            console.error(err);
         }});
     </script>
 </body>

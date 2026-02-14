@@ -42,7 +42,7 @@ class FaceDetectorTrainer:
         self.model = create_face_detector(config)
 
         # Build model
-        input_size = self.model_config.get('input_size', 256)
+        input_size = self.model_config.get('input_size', 224)
         self.model.build((None, input_size, input_size, 3))
 
         # Print model summary

@@ -123,11 +123,13 @@ def giou_loss(pred_boxes: tf.Tensor, gt_boxes: tf.Tensor) -> tf.Tensor:
     inter_h = tf.maximum(0.0, inter_y_max - inter_y_min)
     inter_area = inter_w * inter_h
 
-    # Compute union
-    pred_area = (pred_boxes[:, 2] - pred_boxes[:, 0]) * \
-                (pred_boxes[:, 3] - pred_boxes[:, 1])
-    gt_area = (gt_boxes[:, 2] - gt_boxes[:, 0]) * \
-              (gt_boxes[:, 3] - gt_boxes[:, 1])
+    # Compute union (use tf.maximum to protect against invalid boxes)
+    pred_w = tf.maximum(0.0, pred_boxes[:, 2] - pred_boxes[:, 0])
+    pred_h = tf.maximum(0.0, pred_boxes[:, 3] - pred_boxes[:, 1])
+    pred_area = pred_w * pred_h
+    gt_w = tf.maximum(0.0, gt_boxes[:, 2] - gt_boxes[:, 0])
+    gt_h = tf.maximum(0.0, gt_boxes[:, 3] - gt_boxes[:, 1])
+    gt_area = gt_w * gt_h
     union_area = pred_area + gt_area - inter_area
 
     # IoU

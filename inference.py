@@ -141,7 +141,7 @@ class FaceDetectorInference:
             print("Mixed precision FP16 enabled")
 
         # Load config
-        with open(config_path, 'r') as f:
+        with open(config_path, 'r', encoding='utf-8') as f:
             self.config = yaml.safe_load(f)
 
         self.input_size = self.config.get('model', {}).get('input_size', 224)

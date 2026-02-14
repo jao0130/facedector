@@ -369,6 +369,7 @@ def run_inference_on_video(
     use_fp16: bool = False,
     resolution: Optional[Tuple[int, int]] = None,
     benchmark: bool = False,
+    target_fps: int = 0,
 ):
     """
     Run optimized inference on video or webcam.
@@ -411,6 +412,8 @@ def run_inference_on_video(
     print(f"Processing: {mode_str}")
     print(f"  Source FPS: {fps_source}, Size: {width}x{height}")
     print(f"  Confidence threshold: {confidence_threshold}")
+    if target_fps > 0:
+        print(f"  Target FPS: {target_fps}")
     if total_frames > 0:
         print(f"  Total frames: {total_frames}")
     print("  Press 'q' to quit")
@@ -432,12 +435,23 @@ def run_inference_on_video(
     # Benchmark mode
     bench_times = [] if benchmark else None
 
+    # FPS limiter
+    frame_interval = 1.0 / target_fps if target_fps > 0 else 0
+    last_frame_time = 0.0
+
     while True:
         ret, frame = cap.read()
         if not ret or frame is None:
             if is_webcam:
                 continue  # Retry on webcam frame drop
             break
+
+        # FPS limiter: skip frame if too early
+        if frame_interval > 0:
+            now = time.perf_counter()
+            if now - last_frame_time < frame_interval:
+                continue
+            last_frame_time = now
 
         # Convert BGR → RGB for model
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -528,6 +542,8 @@ def main():
                         help='Camera resolution WxH (e.g., 640x480, 1280x720)')
     parser.add_argument('--benchmark', action='store_true',
                         help='Run benchmark and print inference statistics')
+    parser.add_argument('--fps', type=int, default=0,
+                        help='Target FPS limit (0 = unlimited, e.g., --fps 5)')
 
     args = parser.parse_args()
 
@@ -552,6 +568,7 @@ def main():
             use_fp16=args.fp16,
             resolution=resolution,
             benchmark=args.benchmark,
+            target_fps=args.fps,
         )
     else:
         run_inference_on_image(

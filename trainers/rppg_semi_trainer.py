@@ -11,7 +11,7 @@ Teacher model is an EMA copy of Student (no gradient updates).
 import os
 import copy
 import math
-from itertools import cycle
+from typing import Iterator
 from typing import Dict
 
 import torch
@@ -106,9 +106,8 @@ class rPPGSemiTrainer(BaseTrainer):
             epoch_unsup = 0.0
             epoch_total = 0.0
 
-            # Cycle the shorter loader
             labeled_iter = iter(train_loader)
-            unlabeled_iter = iter(cycle(unlabeled_loader)) if unlabeled_loader else None
+            unlabeled_iter = iter(unlabeled_loader) if unlabeled_loader else None
 
             lambda_w = self._ramp_up_weight(epoch, self.ramp_up_epochs) * self.lambda_max
 
@@ -140,7 +139,11 @@ class rPPGSemiTrainer(BaseTrainer):
                 # ── Unsupervised branch: forward + backward ──
                 loss_unsup = torch.tensor(0.0, device=self.device)
                 if unlabeled_iter is not None and lambda_w > 0:
-                    video_u = next(unlabeled_iter)
+                    try:
+                        video_u = next(unlabeled_iter)
+                    except StopIteration:
+                        unlabeled_iter = iter(unlabeled_loader)
+                        video_u = next(unlabeled_iter)
                     video_u = video_u.to(self.device)
 
                     # Student forward

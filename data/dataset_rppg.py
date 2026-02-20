@@ -44,29 +44,25 @@ class rPPGVideoDataset(Dataset):
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         base_path = self.file_list[idx]
 
-        # Load video chunk: [T, H, W, C] or [C, T, H, W]
-        video = np.load(base_path + "_input.npy").astype(np.float32)
+        # Load video chunk: [T, H, W, C] uint8 -> [C, T, H, W] float32
+        video = np.load(base_path + "_input.npy")
         if video.ndim == 4:
             if video.shape[-1] in (1, 3):
-                # [T, H, W, C] -> [C, T, H, W]
                 video = np.transpose(video, (3, 0, 1, 2))
-            # else assume already [C, T, H, W]
+        video_tensor = torch.from_numpy(video.copy()).float()
 
         # Load BVP label: [T]
-        bvp = np.load(base_path + "_bvp.npy").astype(np.float32)
+        bvp = np.load(base_path + "_bvp.npy")
+        bvp_tensor = torch.from_numpy(bvp.copy()).float()
 
         # Load SpO2 label: scalar or [T]
         spo2_path = base_path + "_spo2.npy"
         if os.path.exists(spo2_path):
-            spo2 = np.load(spo2_path).astype(np.float32)
-            if spo2.ndim > 0:
-                spo2 = np.mean(spo2)  # Average to scalar
+            spo2 = np.load(spo2_path)
+            spo2 = float(np.mean(spo2))
         else:
-            spo2 = np.float32(0.0)
-
-        video_tensor = torch.from_numpy(video)
-        bvp_tensor = torch.from_numpy(bvp)
-        spo2_tensor = torch.tensor([float(spo2)], dtype=torch.float32)
+            spo2 = 0.0
+        spo2_tensor = torch.tensor([spo2], dtype=torch.float32)
 
         return video_tensor, bvp_tensor, spo2_tensor
 
@@ -89,10 +85,10 @@ class rPPGUnlabeledDataset(Dataset):
 
     def __getitem__(self, idx: int) -> torch.Tensor:
         base_path = self.file_list[idx]
-        video = np.load(base_path + "_input.npy").astype(np.float32)
+        video = np.load(base_path + "_input.npy")
         if video.ndim == 4 and video.shape[-1] in (1, 3):
             video = np.transpose(video, (3, 0, 1, 2))
-        return torch.from_numpy(video)
+        return torch.from_numpy(video.copy()).float()
 
 
 def _discover_npy_files(cached_path) -> List[str]:

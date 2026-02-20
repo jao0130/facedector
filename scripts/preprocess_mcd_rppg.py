@@ -368,26 +368,27 @@ def parse_video_id(video_path: str) -> Tuple[str, str, str]:
     return name, "", ""
 
 
-def find_ppg_sync(data_dir: str, subject: str, state: str) -> Optional[str]:
-    """Find the ppg_sync file for a given subject and state."""
+def find_ppg_sync(data_dir: str, subject: str, camera: str, state: str) -> Optional[str]:
+    """Find the ppg_sync file for a given subject, camera, and state."""
     ppg_dir = os.path.join(data_dir, "ppg_sync")
     if not os.path.isdir(ppg_dir):
         return None
 
-    # Try common naming patterns
+    # MCD-rPPG naming: {subject}_{camera}_{state}.txt
     candidates = [
-        f"{subject}_{state}.txt",
-        f"{subject}_{state}.TXT",
+        f"{subject}_{camera}_{state}.txt",
+        f"{subject}_{state}.txt",  # fallback without camera
     ]
     for cand in candidates:
         path = os.path.join(ppg_dir, cand)
         if os.path.isfile(path):
             return path
 
-    # Fallback: search for any file containing subject and state
+    # Fallback: search for any file containing subject, camera and state
     for f in os.listdir(ppg_dir):
         if subject in f and state in f and f.endswith('.txt'):
-            return os.path.join(ppg_dir, f)
+            if camera in f or '_' not in f.replace(subject, '').replace(state, ''):
+                return os.path.join(ppg_dir, f)
 
     return None
 
@@ -464,7 +465,7 @@ def main():
             break
 
         # Find PPG sync file
-        ppg_path = find_ppg_sync(data_dir, subject, state)
+        ppg_path = find_ppg_sync(data_dir, subject, camera, state)
         if ppg_path is None:
             no_ppg_count += 1
             if (i + 1) % 100 == 0:

@@ -1,6 +1,6 @@
 TASK: "rppg_semi"
 DEVICE: "cuda:0"
-NUM_WORKERS: 8
+NUM_WORKERS: 4
 
 RPPG_MODEL:
   NAME: "FCAtt"

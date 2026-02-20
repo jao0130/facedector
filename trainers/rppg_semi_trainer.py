@@ -227,9 +227,9 @@ class rPPGSemiTrainer(BaseTrainer):
         """EMA: teacher = alpha * teacher + (1 - alpha) * student."""
         for t_param, s_param in zip(self.teacher.parameters(), self.student.parameters()):
             t_param.data.mul_(alpha).add_(s_param.data, alpha=1 - alpha)
-        # Copy BN running stats (buffers) directly from student
+        # EMA for BN running stats (buffers) — smooth update, not direct copy
         for t_buf, s_buf in zip(self.teacher.buffers(), self.student.buffers()):
-            t_buf.data.copy_(s_buf.data)
+            t_buf.data.mul_(alpha).add_(s_buf.data, alpha=1 - alpha)
 
     @staticmethod
     def _ramp_up_weight(epoch: int, ramp_up_epochs: int) -> float:

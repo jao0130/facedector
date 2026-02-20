@@ -66,7 +66,7 @@ class rPPGVideoDataset(Dataset):
 
         video_tensor = torch.from_numpy(video)
         bvp_tensor = torch.from_numpy(bvp)
-        spo2_tensor = torch.tensor([spo2], dtype=torch.float32)
+        spo2_tensor = torch.tensor([float(spo2)], dtype=torch.float32)
 
         return video_tensor, bvp_tensor, spo2_tensor
 

@@ -112,6 +112,6 @@ class TemporalConsistencyLoss(nn.Module):
         Returns:
             Scalar MSE loss on z-scored signals.
         """
-        s_norm = (student_wave - student_wave.mean(dim=1, keepdim=True)) / (student_wave.std(dim=1, keepdim=True) + 1e-8)
-        t_norm = (teacher_wave - teacher_wave.mean(dim=1, keepdim=True)) / (teacher_wave.std(dim=1, keepdim=True) + 1e-8)
+        s_norm = (student_wave - student_wave.mean(dim=1, keepdim=True)) / (student_wave.std(dim=1, keepdim=True).clamp(min=1e-6))
+        t_norm = (teacher_wave - teacher_wave.mean(dim=1, keepdim=True)) / (teacher_wave.std(dim=1, keepdim=True).clamp(min=1e-6))
         return F.mse_loss(s_norm, t_norm)

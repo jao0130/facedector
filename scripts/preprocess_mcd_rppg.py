@@ -43,7 +43,6 @@ CHUNK_LENGTH = 128
 INPUT_SIZE = 72
 LARGE_BOX_COEF = 1.5
 FACE_THRESHOLD = 0.4
-PPG_SYNC_SAMPLE_RATE = 100  # Hz
 
 
 def download_dataset(hf_cache: str, camera: str = "FullHDwebcam"):
@@ -119,12 +118,12 @@ def load_spo2_map(db_csv_path: str) -> Dict[str, float]:
 
 def load_ppg_sync(ppg_path: str, n_video_frames: int, video_fps: float) -> Optional[np.ndarray]:
     """
-    Load ppg_sync .txt file (100Hz) and resample to match video frames.
+    Load ppg_sync .txt file — already frame-synchronized (one PPG value per video frame).
 
-    Args:
-        ppg_path: path to ppg_sync .txt file
-        n_video_frames: number of video frames to align to
-        video_fps: video frame rate
+    Format: "{interval_or_index} {ppg_value}" per line.
+    The file has exactly as many lines as video frames (no resampling needed).
+
+    If lengths differ, interpolates to match n_video_frames.
 
     Returns:
         [n_video_frames] float32 array, or None if failed.
@@ -141,34 +140,29 @@ def load_ppg_sync(ppg_path: str, n_video_frames: int, video_fps: float) -> Optio
                     continue
                 parts = line.split()
                 if len(parts) >= 2:
-                    # Format: "{sample_index} {ppg_value}"
                     ppg_values.append(float(parts[1]))
                 else:
                     ppg_values.append(float(parts[0]))
 
-        if len(ppg_values) < 10:
+        if len(ppg_values) < CHUNK_LENGTH:
             return None
 
-        ppg_raw = np.array(ppg_values, dtype=np.float64)
+        ppg_raw = np.array(ppg_values, dtype=np.float32)
 
-        # Validate PPG covers enough of the video duration
-        video_duration = n_video_frames / video_fps
-        ppg_duration = len(ppg_raw) / PPG_SYNC_SAMPLE_RATE
-        if ppg_duration < video_duration * 0.8:
-            # PPG signal too short — would cause flat-line artifacts at the end
+        # PPG is frame-aligned — length should roughly match video frames
+        if len(ppg_raw) == n_video_frames:
+            return ppg_raw
+        elif len(ppg_raw) >= n_video_frames * 0.8:
+            # Close enough — interpolate to exact video length
+            ppg_resampled = np.interp(
+                np.linspace(0, len(ppg_raw) - 1, n_video_frames),
+                np.arange(len(ppg_raw)),
+                ppg_raw,
+            )
+            return ppg_resampled.astype(np.float32)
+        else:
+            # PPG too short relative to video
             return None
-
-        # Resample from PPG_SYNC_SAMPLE_RATE (100Hz) to video_fps
-        video_times = np.arange(n_video_frames) / video_fps
-        ppg_indices = video_times * PPG_SYNC_SAMPLE_RATE
-
-        # Clip to valid range
-        ppg_indices = np.clip(ppg_indices, 0, len(ppg_raw) - 1)
-
-        # Linear interpolation
-        ppg_resampled = np.interp(ppg_indices, np.arange(len(ppg_raw)), ppg_raw)
-
-        return ppg_resampled.astype(np.float32)
 
     except Exception as e:
         print(f"  WARNING: Failed to load PPG sync: {ppg_path}: {e}")

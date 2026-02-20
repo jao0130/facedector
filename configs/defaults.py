@@ -62,6 +62,7 @@ _C.RPPG_DATA = CN()
 _C.RPPG_DATA.DATASET = "PURE"
 _C.RPPG_DATA.DATA_PATH = ""
 _C.RPPG_DATA.CACHED_PATH = ""
+_C.RPPG_DATA.CACHED_PATHS = []          # Multi-source labeled cache dirs
 _C.RPPG_DATA.FS = 30
 _C.RPPG_DATA.CHUNK_LENGTH = 128
 _C.RPPG_DATA.LABEL_TYPE = "DiffNormalized"
@@ -125,7 +126,8 @@ _C.RPPG_TRAIN.USE_LAST_EPOCH = False
 # ── Semi-supervised rPPG (Mean Teacher) ──
 _C.RPPG_SEMI = CN()
 _C.RPPG_SEMI.ENABLED = False
-_C.RPPG_SEMI.UNLABELED_PATH = ""          # Preprocessed NPY dir (e.g. VoxCeleb2)
+_C.RPPG_SEMI.UNLABELED_PATH = ""          # Single unlabeled NPY dir
+_C.RPPG_SEMI.UNLABELED_PATHS = []        # Multi-source unlabeled NPY dirs
 _C.RPPG_SEMI.EMA_DECAY = 0.999            # Teacher EMA decay
 _C.RPPG_SEMI.LAMBDA_UNSUP = 1.0           # Max unsupervised loss weight
 _C.RPPG_SEMI.RAMP_UP_EPOCHS = 30          # Sigmoid ramp-up duration

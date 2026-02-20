@@ -18,9 +18,12 @@ RPPG_MODEL:
   WEIGHTS: "checkpoints/rppg/rppg_fcatt_128f_72px_pretrain.pth"
 
 RPPG_DATA:
-  DATASET: "PURE"
-  DATA_PATH: "D:/PURE"
-  CACHED_PATH: "D:/PreprocessedData"
+  DATASET: "PURE+MCD-rPPG"
+  DATA_PATH: ""
+  CACHED_PATH: ""
+  CACHED_PATHS:
+    - "D:/PreprocessedData"          # PURE (labeled)
+    - "D:/PreprocessedData_MCD"      # MCD-rPPG FullHDwebcam (labeled)
   FS: 30
   CHUNK_LENGTH: 128
   LABEL_TYPE: "DiffNormalized"
@@ -53,7 +56,9 @@ RPPG_TRAIN:
 
 RPPG_SEMI:
   ENABLED: true
-  UNLABELED_PATH: "D:/PreprocessedData_VoxCeleb2"
+  UNLABELED_PATH: ""
+  UNLABELED_PATHS:
+    - "D:/PreprocessedData_CelebVHQ" # CelebV-HQ (unlabeled)
   EMA_DECAY: 0.999
   LAMBDA_UNSUP: 1.0
   RAMP_UP_EPOCHS: 30

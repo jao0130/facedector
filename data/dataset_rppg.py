@@ -95,13 +95,28 @@ class rPPGUnlabeledDataset(Dataset):
         return torch.from_numpy(video)
 
 
-def _discover_npy_files(cached_path: str) -> List[str]:
+def _discover_npy_files(cached_path) -> List[str]:
     """
-    Discover preprocessed NPY file base paths from cached directory.
+    Discover preprocessed NPY file base paths from cached directory(ies).
     Looks for *_input.npy files and returns base paths (without _input.npy suffix).
+
+    Args:
+        cached_path: str or list of str — one or more directories to scan.
     """
-    input_files = sorted(glob.glob(os.path.join(cached_path, "**", "*_input.npy"), recursive=True))
-    return [f.replace("_input.npy", "") for f in input_files]
+    if isinstance(cached_path, str):
+        paths = [cached_path] if cached_path else []
+    else:
+        paths = [p for p in cached_path if p]
+
+    all_bases = set()
+    for p in paths:
+        if not os.path.isdir(p):
+            print(f"[Dataset] WARNING: Directory not found, skipping: {p}")
+            continue
+        found = glob.glob(os.path.join(p, "**", "*_input.npy"), recursive=True)
+        for f in found:
+            all_bases.add(f.replace("_input.npy", ""))
+    return sorted(all_bases)
 
 
 def _split_by_ratio(file_list: List[str], begin: float, end: float) -> List[str]:
@@ -122,9 +137,14 @@ def create_rppg_dataloaders(cfg) -> Dict[str, DataLoader]:
     Returns:
         dict with 'train', 'valid', and optionally 'test' DataLoaders.
     """
-    cached_path = cfg.RPPG_DATA.CACHED_PATH
-    all_files = _discover_npy_files(cached_path)
-    print(f"[rPPG Data] {cfg.RPPG_DATA.DATASET}: {len(all_files)} chunks in {cached_path}")
+    # Merge single path + multi-path list
+    cached_paths = []
+    if cfg.RPPG_DATA.CACHED_PATH:
+        cached_paths.append(cfg.RPPG_DATA.CACHED_PATH)
+    cached_paths.extend(cfg.RPPG_DATA.CACHED_PATHS)
+
+    all_files = _discover_npy_files(cached_paths)
+    print(f"[rPPG Data] {cfg.RPPG_DATA.DATASET}: {len(all_files)} chunks from {len(cached_paths)} source(s)")
 
     # Split training dataset by ratios
     train_files = _split_by_ratio(all_files, cfg.RPPG_DATA.TRAIN_BEGIN, cfg.RPPG_DATA.TRAIN_END)
@@ -176,11 +196,15 @@ def create_rppg_semi_dataloaders(cfg) -> Dict[str, DataLoader]:
     # Labeled data (same as supervised)
     loaders = create_rppg_dataloaders(cfg)
 
-    # Unlabeled data
-    unlabeled_path = cfg.RPPG_SEMI.UNLABELED_PATH
-    if unlabeled_path and os.path.isdir(unlabeled_path):
-        unlabeled_files = _discover_npy_files(unlabeled_path)
-        print(f"[rPPG Semi] Unlabeled: {len(unlabeled_files)} chunks in {unlabeled_path}")
+    # Unlabeled data — merge single path + multi-path list
+    unlabeled_paths = []
+    if cfg.RPPG_SEMI.UNLABELED_PATH:
+        unlabeled_paths.append(cfg.RPPG_SEMI.UNLABELED_PATH)
+    unlabeled_paths.extend(cfg.RPPG_SEMI.UNLABELED_PATHS)
+
+    if unlabeled_paths:
+        unlabeled_files = _discover_npy_files(unlabeled_paths)
+        print(f"[rPPG Semi] Unlabeled: {len(unlabeled_files)} chunks from {len(unlabeled_paths)} source(s)")
 
         if unlabeled_files:
             unlabeled_ds = rPPGUnlabeledDataset(unlabeled_files, cfg)
@@ -193,6 +217,6 @@ def create_rppg_semi_dataloaders(cfg) -> Dict[str, DataLoader]:
                 drop_last=True,
             )
     else:
-        print(f"[rPPG Semi] WARNING: Unlabeled path not found: {unlabeled_path}")
+        print("[rPPG Semi] WARNING: No unlabeled data paths configured")
 
     return loaders

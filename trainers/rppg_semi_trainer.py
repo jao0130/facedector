@@ -227,9 +227,12 @@ class rPPGSemiTrainer(BaseTrainer):
         """EMA: teacher = alpha * teacher + (1 - alpha) * student."""
         for t_param, s_param in zip(self.teacher.parameters(), self.student.parameters()):
             t_param.data.mul_(alpha).add_(s_param.data, alpha=1 - alpha)
-        # EMA for BN running stats (buffers) — smooth update, not direct copy
+        # EMA for BN running stats (float buffers only); copy integer buffers directly
         for t_buf, s_buf in zip(self.teacher.buffers(), self.student.buffers()):
-            t_buf.data.mul_(alpha).add_(s_buf.data, alpha=1 - alpha)
+            if t_buf.is_floating_point():
+                t_buf.data.mul_(alpha).add_(s_buf.data, alpha=1 - alpha)
+            else:
+                t_buf.data.copy_(s_buf.data)
 
     @staticmethod
     def _ramp_up_weight(epoch: int, ramp_up_epochs: int) -> float:

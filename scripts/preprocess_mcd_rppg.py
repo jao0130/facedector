@@ -23,8 +23,8 @@ Usage:
 
 MCD-rPPG structure (HuggingFace kyegorov/mcd_rppg):
     video/{subject}_{camera}_{state}.avi
-    ppg_sync/{subject}_{state}.txt        (100Hz PPG, one value per line)
-    db.csv                                (subject metadata + SpO2)
+    ppg_sync/{subject}_{camera}_{state}.txt  (100Hz PPG, "{index} {value}" per line)
+    db.csv                                   (subject metadata + SpO2)
 """
 
 import argparse
@@ -94,7 +94,7 @@ def load_spo2_map(db_csv_path: str) -> Dict[str, float]:
 
         # Find subject ID column
         id_col = None
-        for candidate in ['id', 'subject', 'subject_id', 'ID', 'Subject']:
+        for candidate in ['patient_id', 'id', 'subject', 'subject_id', 'ID', 'Subject']:
             if candidate in columns:
                 id_col = candidate
                 break
@@ -137,8 +137,14 @@ def load_ppg_sync(ppg_path: str, n_video_frames: int, video_fps: float) -> Optio
         with open(ppg_path, 'r') as f:
             for line in f:
                 line = line.strip()
-                if line:
-                    ppg_values.append(float(line))
+                if not line:
+                    continue
+                parts = line.split()
+                if len(parts) >= 2:
+                    # Format: "{sample_index} {ppg_value}"
+                    ppg_values.append(float(parts[1]))
+                else:
+                    ppg_values.append(float(parts[0]))
 
         if len(ppg_values) < 10:
             return None
@@ -238,9 +244,13 @@ def detect_face_bbox(detector, frame_rgb: np.ndarray) -> Optional[Tuple[int, int
     return (x1, y1, x2, y2)
 
 
+DETECT_EVERY_N = 15  # Run face detection every Nth sampled frame (~0.5s at 30fps)
+
+
 def process_video(video_path: str, detector) -> Optional[Tuple[np.ndarray, float]]:
     """
     Extract face-cropped frames from a video.
+    Detects face every DETECT_EVERY_N frames and reuses bbox for intermediate frames.
 
     Returns:
         (frames [N, 72, 72, 3] uint8, actual_fps) or None.
@@ -260,6 +270,7 @@ def process_video(video_path: str, detector) -> Optional[Tuple[np.ndarray, float
 
     frames = []
     frame_idx = 0
+    sampled_idx = 0
     consecutive_misses = 0
     last_bbox = None
 
@@ -274,7 +285,13 @@ def process_video(video_path: str, detector) -> Optional[Tuple[np.ndarray, float
         frame_idx += 1
 
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        bbox = detect_face_bbox(detector, frame_rgb)
+
+        # Only run face detection every N sampled frames
+        if sampled_idx % DETECT_EVERY_N == 0 or last_bbox is None:
+            bbox = detect_face_bbox(detector, frame_rgb)
+        else:
+            bbox = last_bbox
+        sampled_idx += 1
 
         if bbox is None:
             consecutive_misses += 1
@@ -285,7 +302,8 @@ def process_video(video_path: str, detector) -> Optional[Tuple[np.ndarray, float
             else:
                 continue
         else:
-            consecutive_misses = 0
+            if bbox != last_bbox:
+                consecutive_misses = 0
             last_bbox = bbox
 
         x1, y1, x2, y2 = bbox
@@ -499,8 +517,7 @@ def main():
         total_chunks += saved
         success_count += 1
 
-        if (i + 1) % 50 == 0 or saved > 0:
-            print(f"{prefix} {video_id}: {saved} chunks ({frames.shape[0]} frames, SpO2={spo2_val:.1f}) | Total: {total_chunks}")
+        print(f"{prefix} {video_id}: {saved} chunks ({frames.shape[0]} frames, SpO2={spo2_val:.1f}) | Total: {total_chunks}")
 
     # Summary
     print()

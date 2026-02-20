@@ -213,7 +213,7 @@ def create_rppg_semi_dataloaders(cfg) -> Dict[str, DataLoader]:
                 batch_size=cfg.RPPG_SEMI.UNLABELED_BATCH_SIZE,
                 shuffle=True,
                 num_workers=cfg.NUM_WORKERS,
-                pin_memory=True,
+                pin_memory=False,
                 drop_last=True,
             )
     else:

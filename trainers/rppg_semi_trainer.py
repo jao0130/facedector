@@ -116,7 +116,8 @@ class rPPGSemiTrainer(BaseTrainer):
             pbar = tqdm(range(steps_per_epoch), desc=f"Semi Epoch {epoch+1}/{total_epochs}", leave=False)
 
             for step in pbar:
-                # ── Supervised branch ──
+                # ── Supervised branch: forward + backward ──
+                # (backward immediately to free activations before unsupervised branch)
                 try:
                     video_l, bvp_label, _ = next(labeled_iter)
                 except StopIteration:
@@ -133,7 +134,10 @@ class rPPGSemiTrainer(BaseTrainer):
                 label_norm = (bvp_label - bvp_label.mean(dim=1, keepdim=True)) / (bvp_label.std(dim=1, keepdim=True) + 1e-8)
                 loss_sup = self.bvp_criterion(pred_norm, label_norm) * 100.0
 
-                # ── Unsupervised branch ──
+                (loss_sup / self.grad_accum).backward()
+                del video_l, bvp_label, pred_ppg_l, pred_norm, label_norm
+
+                # ── Unsupervised branch: forward + backward ──
                 loss_unsup = torch.tensor(0.0, device=self.device)
                 if unlabeled_iter is not None and lambda_w > 0:
                     video_u = next(unlabeled_iter)
@@ -154,10 +158,8 @@ class rPPGSemiTrainer(BaseTrainer):
 
                     loss_unsup = loss_consist + self.freq_weight * loss_freq
 
-                # ── Total loss ──
-                total_loss = loss_sup + lambda_w * loss_unsup
-
-                (total_loss / self.grad_accum).backward()
+                    (lambda_w * loss_unsup / self.grad_accum).backward()
+                    del video_u, pred_ppg_s, pred_ppg_t
 
                 if (step + 1) % self.grad_accum == 0:
                     nn.utils.clip_grad_norm_(self.student.parameters(), self.grad_clip)
@@ -170,7 +172,7 @@ class rPPGSemiTrainer(BaseTrainer):
 
                 epoch_sup += loss_sup.item()
                 epoch_unsup += loss_unsup.item()
-                epoch_total += total_loss.item()
+                epoch_total += loss_sup.item() + lambda_w * loss_unsup.item()
 
                 pbar.set_postfix(
                     sup=f"{loss_sup.item():.2f}",

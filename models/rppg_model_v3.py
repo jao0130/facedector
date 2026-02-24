@@ -49,7 +49,7 @@ class DiffNormalizeLayer(nn.Module):
         # x: [B, 3, T, H, W]
         diff = x[:, :, 1:] - x[:, :, :-1]
         norm = diff / (x[:, :, 1:].abs() + x[:, :, :-1].abs() + 1e-7)
-        norm = norm / (norm.std(dim=2, keepdim=True) + 1e-7)
+        norm = norm / (norm.std(dim=(2, 3, 4), keepdim=True) + 1e-7)
         norm = torch.clamp(norm, -5.0, 5.0)
         pad  = torch.zeros_like(x[:, :, :1])
         return torch.cat([pad, norm], dim=2)                    # [B, 3, T, H, W]

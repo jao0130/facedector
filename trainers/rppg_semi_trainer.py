@@ -267,6 +267,7 @@ class rPPGSemiTrainer(BaseTrainer):
             label_norm = (bvp_label - bvp_label.mean(dim=1, keepdim=True)) / (bvp_label.std(dim=1, keepdim=True) + 1e-8)
             loss = self.bvp_criterion(pred_norm, label_norm) * 100.0
             total_loss += loss.item()
+        self.student.train()
         return total_loss / max(len(loader), 1)
 
     def validate(self, data_loader) -> float:

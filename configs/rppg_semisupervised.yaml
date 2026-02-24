@@ -18,11 +18,12 @@ RPPG_MODEL:
   WEIGHTS: ""
 
 RPPG_DATA:
-  DATASET: "PURE"
+  DATASET: "PURE+MCD-rPPG"
   DATA_PATH: ""
   CACHED_PATH: ""
   CACHED_PATHS:
-    - "D:/PreprocessedData"          # PURE (labeled, training only)
+    - "D:/PreprocessedData"          # PURE (labeled)
+    - "D:/PreprocessedData_MCD"      # MCD-rPPG (labeled)
   FS: 30
   CHUNK_LENGTH: 128
   LABEL_TYPE: "DiffNormalized"
@@ -32,12 +33,11 @@ RPPG_DATA:
   RESIZE_W: 72
   RESIZE_H: 72
   DO_PREPROCESS: false
-  TEST_DATASET: ""
-  TEST_DATA_PATH: ""
+  TEST_DATASET: "UBFC"
+  TEST_DATA_PATH: "D:/UBFC/DATASET_2"
   TEST_CACHED_PATH: ""
   TEST_CACHED_PATHS:
     - "D:/PreprocessedData_UBFC"     # UBFC test
-    - "D:/PreprocessedData_MCD"      # MCD-rPPG test
   TRAIN_BEGIN: 0.0
   TRAIN_END: 0.8
   VALID_BEGIN: 0.8

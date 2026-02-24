@@ -272,8 +272,13 @@ class rPPGSemiTrainer(BaseTrainer):
     def validate(self, data_loader) -> float:
         return self._validate(data_loader)
 
-    def test(self, data_loader) -> dict:
-        """Evaluate HR metrics on test set."""
+    def test(self, data_loader, dataset_name: str = "") -> dict:
+        """Evaluate HR metrics on test set.
+
+        Args:
+            data_loader: DataLoader for labeled test data.
+            dataset_name: Optional name shown in log output (e.g. "UBFC", "MCD").
+        """
         from utils.signal_processing import estimate_hr_fft
 
         self.student.eval()
@@ -297,11 +302,11 @@ class rPPGSemiTrainer(BaseTrainer):
         mae = np.mean(np.abs(hr_preds - hr_gts))
         rmse = np.sqrt(np.mean((hr_preds - hr_gts) ** 2))
 
-        # Pearson correlation
         if len(hr_preds) > 1:
             pearson_r = np.corrcoef(hr_preds, hr_gts)[0, 1]
         else:
             pearson_r = 0.0
 
-        print(f"  [Test] HR MAE: {mae:.2f} BPM | RMSE: {rmse:.2f} BPM | Pearson r: {pearson_r:.4f}")
+        tag = f" [{dataset_name}]" if dataset_name else ""
+        print(f"  [Test]{tag} HR MAE: {mae:.2f} BPM | RMSE: {rmse:.2f} BPM | Pearson r: {pearson_r:.4f}")
         return {'hr_mae': mae, 'hr_rmse': rmse, 'hr_pearson_r': pearson_r}

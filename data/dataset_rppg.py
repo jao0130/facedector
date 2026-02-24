@@ -53,6 +53,18 @@ class rPPGVideoDataset(Dataset):
 
         # Load BVP label: [T]
         bvp = np.load(base_path + "_bvp.npy")
+
+        # Apply DiffNorm to BVP label when LABEL_TYPE == "DiffNormalized".
+        # The model's first layer (DiffNormalizeLayer) produces a difference-style
+        # signal from the input frames. Applying the same transform to the label
+        # aligns the training target with the model's output representation and
+        # improves Pearson correlation during training.
+        label_type = "DiffNormalized"
+        if self.cfg is not None:
+            label_type = getattr(self.cfg.RPPG_DATA, 'LABEL_TYPE', 'DiffNormalized')
+        if label_type == "DiffNormalized":
+            bvp = _diff_normalize_bvp(bvp)
+
         bvp_tensor = torch.from_numpy(bvp.copy()).float()
 
         # Load SpO2 label: scalar or [T]
@@ -89,6 +101,26 @@ class rPPGUnlabeledDataset(Dataset):
         if video.ndim == 4 and video.shape[-1] in (1, 3):
             video = np.transpose(video, (3, 0, 1, 2))
         return torch.from_numpy(video.copy()).float()
+
+
+def _diff_normalize_bvp(bvp: np.ndarray) -> np.ndarray:
+    """
+    Apply DiffNormalize to a 1D BVP signal (mirrors DiffNormalizeLayer for video).
+
+    Formula:
+        diff[t] = bvp[t] - bvp[t-1]
+        norm[t] = diff[t] / (|bvp[t]| + |bvp[t-1]| + ε)
+        norm    = norm / (std(norm) + ε)
+        norm    = clamp(norm, -5, 5)
+        result  = [0, norm[0], norm[1], ..., norm[T-2]]  (pad first sample with 0)
+    """
+    bvp = bvp.astype(np.float32)
+    diff = bvp[1:] - bvp[:-1]
+    denom = np.abs(bvp[1:]) + np.abs(bvp[:-1]) + 1e-7
+    norm = diff / denom
+    norm = norm / (norm.std() + 1e-7)
+    norm = np.clip(norm, -5.0, 5.0)
+    return np.concatenate([[0.0], norm]).astype(np.float32)
 
 
 def _discover_npy_files(cached_path) -> List[str]:
@@ -191,18 +223,39 @@ def create_rppg_dataloaders(cfg) -> Dict[str, DataLoader]:
             pin_memory=True,
         )
 
-    # Independent test set (e.g. UBFC)
-    test_cached = cfg.RPPG_DATA.TEST_CACHED_PATH
-    if test_cached and os.path.isdir(test_cached):
-        test_files = _discover_npy_files(test_cached)
-        if test_files:
-            print(f"[rPPG Data] Test ({cfg.RPPG_DATA.TEST_DATASET}): {len(test_files)} chunks in {test_cached}")
-            test_ds = rPPGVideoDataset(test_files, cfg)
-            loaders['test'] = DataLoader(
-                test_ds, batch_size=cfg.RPPG_TRAIN.BATCH_SIZE,
+    # Independent test set(s): single TEST_CACHED_PATH + multi TEST_CACHED_PATHS
+    # Collect (name, path) pairs from both config keys.
+    test_entries: List[Tuple[str, str]] = []
+
+    single_path = cfg.RPPG_DATA.TEST_CACHED_PATH
+    if single_path and os.path.isdir(single_path):
+        name = cfg.RPPG_DATA.TEST_DATASET or os.path.basename(single_path.rstrip('/\\'))
+        test_entries.append((name, single_path))
+
+    for p in getattr(cfg.RPPG_DATA, 'TEST_CACHED_PATHS', []):
+        if p and os.path.isdir(p):
+            # Derive a short name from the directory, e.g.
+            # "D:/PreprocessedData_UBFC" → "UBFC"
+            basename = os.path.basename(p.rstrip('/\\'))
+            name = basename.replace('PreprocessedData_', '').replace('PreprocessedData', 'test')
+            test_entries.append((name, p))
+
+    for name, path in test_entries:
+        files = _discover_npy_files(path)
+        if files:
+            print(f"[rPPG Data] Test ({name}): {len(files)} chunks")
+            ds = rPPGVideoDataset(files, cfg)
+            loader = DataLoader(
+                ds, batch_size=cfg.RPPG_TRAIN.BATCH_SIZE,
                 shuffle=False, num_workers=cfg.NUM_WORKERS,
                 pin_memory=True,
             )
+            # Use "test_{name}" key; first entry also occupies "test" for
+            # backward compatibility with code that checks `if 'test' in loaders`.
+            key = f'test_{name}'
+            loaders[key] = loader
+            if 'test' not in loaders:
+                loaders['test'] = loader
 
     return loaders
 

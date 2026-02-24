@@ -17,6 +17,23 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from configs.defaults import get_config
 
 
+def _run_all_tests(trainer, data_loaders: dict):
+    """Run test() on every loader whose key starts with 'test_'."""
+    test_keys = sorted(k for k in data_loaders if k.startswith('test_'))
+    if not test_keys:
+        if 'test' in data_loaders:
+            # Legacy single test set with key 'test'
+            print("\n[Test] Evaluating on test set...")
+            trainer.test(data_loaders['test'])
+        else:
+            print("[Info] No test set configured.")
+        return
+    for key in test_keys:
+        dataset_name = key[len('test_'):]  # strip "test_" prefix
+        print(f"\n[Test] Evaluating on {dataset_name}...")
+        trainer.test(data_loaders[key], dataset_name=dataset_name)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Unified training: face detection + rPPG")
     parser.add_argument('--config', type=str, required=True, help='Path to YAML config file')
@@ -82,19 +99,11 @@ def main():
             trainer.student.load_state_dict(ckpt['model_state_dict'])
             print(f"[Test] Loaded checkpoint: {ckpt_path}")
 
-            if 'test' in data_loaders:
-                print("[Test] Evaluating on test set...")
-                trainer.test(data_loaders['test'])
-            else:
-                print("[Error] No test set found. Check TEST_CACHED_PATH.")
+            _run_all_tests(trainer, data_loaders)
         else:
             history = trainer.train(data_loaders)
             print(f"\n[Done] Semi-supervised rPPG training complete.")
-
-            # Run test if test set available
-            if 'test' in data_loaders:
-                print("\n[Test] Evaluating on test set...")
-                trainer.test(data_loaders['test'])
+            _run_all_tests(trainer, data_loaders)
 
     else:
         print(f"[Error] Unknown task: {cfg.TASK}. Use 'face_detection', 'rppg', or 'rppg_semi'.")

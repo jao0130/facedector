@@ -20,7 +20,6 @@ from torch.optim.lr_scheduler import OneCycleLR
 from tqdm import tqdm
 
 from .base_trainer import BaseTrainer, make_rppg_ckpt_name
-from models.rppg_model import FCAtt
 from losses.rppg_losses import NegPearsonLoss, FrequencyConstraintLoss, TemporalConsistencyLoss
 
 
@@ -39,8 +38,17 @@ class rPPGSemiTrainer(BaseTrainer):
     def __init__(self, cfg):
         super().__init__(cfg)
 
-        # Student model
-        self.student = FCAtt(cfg=cfg).to(self.device)
+        # Student model (select by config NAME)
+        model_name = getattr(cfg.RPPG_MODEL, 'NAME', 'FCAtt')
+        if model_name == 'FCAtt_v3':
+            from models.rppg_model_v3 import FCAtt_v3
+            self.student = FCAtt_v3(cfg=cfg).to(self.device)
+        elif model_name == 'FCAtt_v2':
+            from models.rppg_model_v2 import FCAtt_v2
+            self.student = FCAtt_v2(cfg=cfg).to(self.device)
+        else:
+            from models.rppg_model import FCAtt
+            self.student = FCAtt(cfg=cfg).to(self.device)
 
         # Load pretrained weights if available
         weights_path = cfg.RPPG_MODEL.WEIGHTS

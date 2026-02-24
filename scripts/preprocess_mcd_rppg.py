@@ -139,10 +139,9 @@ def load_ppg_sync(ppg_path: str, n_video_frames: int, video_fps: float) -> Optio
                 if not line:
                     continue
                 parts = line.split()
-                if len(parts) >= 2:
-                    ppg_values.append(float(parts[1]))
-                else:
-                    ppg_values.append(float(parts[0]))
+                # Column 1 is the PPG waveform (range ~0-255)
+                # Column 2 is a timing/quality value (NOT the PPG signal)
+                ppg_values.append(float(parts[0]))
 
         if len(ppg_values) < CHUNK_LENGTH:
             return None

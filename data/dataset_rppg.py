@@ -115,12 +115,37 @@ def _discover_npy_files(cached_path) -> List[str]:
     return sorted(all_bases)
 
 
-def _split_by_ratio(file_list: List[str], begin: float, end: float) -> List[str]:
-    """Split file list by begin/end ratio."""
-    n = len(file_list)
+def _split_by_session(file_list: List[str], begin: float, end: float) -> List[str]:
+    """
+    Session-level split: groups chunks by their session prefix (everything before _chunkNNN),
+    then splits sessions by ratio.  Prevents the same subject/session from appearing in
+    both train and validation sets.
+
+    File naming convention expected:  <session>_chunk<NNN>
+    e.g.  01-01_chunk000  (PURE),  subject01_chunk000  (UBFC),
+          P001_F01_REST_chunk000  (MCD-rPPG)
+    """
+    import re
+    from collections import defaultdict
+
+    session_groups: dict = defaultdict(list)
+    for f in file_list:
+        basename = os.path.basename(f)
+        m = re.match(r'^(.+)_chunk\d+$', basename)
+        session_key = m.group(1) if m else basename
+        # Include parent directory to keep datasets separated when sorting
+        group_key = os.path.dirname(f) + '/' + session_key
+        session_groups[group_key].append(f)
+
+    sessions = sorted(session_groups.keys())
+    n = len(sessions)
     start_idx = int(n * begin)
-    end_idx = int(n * end)
-    return file_list[start_idx:end_idx]
+    end_idx   = int(n * end)
+
+    result = []
+    for s in sessions[start_idx:end_idx]:
+        result.extend(sorted(session_groups[s]))
+    return result
 
 
 def create_rppg_dataloaders(cfg) -> Dict[str, DataLoader]:
@@ -142,9 +167,9 @@ def create_rppg_dataloaders(cfg) -> Dict[str, DataLoader]:
     all_files = _discover_npy_files(cached_paths)
     print(f"[rPPG Data] {cfg.RPPG_DATA.DATASET}: {len(all_files)} chunks from {len(cached_paths)} source(s)")
 
-    # Split training dataset by ratios
-    train_files = _split_by_ratio(all_files, cfg.RPPG_DATA.TRAIN_BEGIN, cfg.RPPG_DATA.TRAIN_END)
-    valid_files = _split_by_ratio(all_files, cfg.RPPG_DATA.VALID_BEGIN, cfg.RPPG_DATA.VALID_END)
+    # Split by session (not individual chunks) to prevent subject leakage
+    train_files = _split_by_session(all_files, cfg.RPPG_DATA.TRAIN_BEGIN, cfg.RPPG_DATA.TRAIN_END)
+    valid_files = _split_by_session(all_files, cfg.RPPG_DATA.VALID_BEGIN, cfg.RPPG_DATA.VALID_END)
 
     print(f"[rPPG Data] Train: {len(train_files)}, Valid: {len(valid_files)}")
 

@@ -1,22 +1,32 @@
 """
-UBFC-rPPG (DATASET_2) preprocessing for rPPG test evaluation.
+PURE dataset preprocessing for rPPG training (labeled data).
 
-Reads vid.avi + ground_truth.txt from each subject folder and produces:
-    {subject}_chunk{N}_input.npy  [128,72,72,3] uint8
-    {subject}_chunk{N}_bvp.npy    [128] float32
+PURE structure:
+    RawData/
+    |-- 01-01/
+    |   |-- 01-01/          # PNG frames (Image{timestamp}.png)
+    |   |-- 01-01.json      # PPG waveform + SpO2 at ~31Hz
+    |-- 01-02/
+    ...
 
-ground_truth.txt format (3 lines, each with N space-separated values):
-    Line 0: BVP signal (one value per frame)
-    Line 1: HR in BPM (one value per frame)
-    Line 2: Timestamp in seconds
+JSON format:
+    /FullPackage: list of {Timestamp, Value: {waveform, o2saturation, ...}}
+    /Image: list of {Timestamp, ...} (one per video frame)
+
+Output:
+    {session}_chunk{N}_input.npy  [128,72,72,3] uint8
+    {session}_chunk{N}_bvp.npy    [128] float32
+    {session}_chunk{N}_spo2.npy   scalar float32
 
 Usage:
-    python scripts/preprocess_ubfc.py \
-        --input D:/UBFC/DATASET_2 \
-        --output D:/PreprocessedData_UBFC
+    python scripts/preprocess_pure.py \
+        --input D:/PURE \
+        --output D:/PreprocessedData
 """
 
 import argparse
+import glob
+import json
 import os
 import sys
 from pathlib import Path
@@ -26,7 +36,6 @@ import cv2
 import numpy as np
 
 # ── Constants (match training preprocessing) ──
-TARGET_FPS = 30
 CHUNK_LENGTH = 128
 INPUT_SIZE = 72
 LARGE_BOX_COEF = 1.5
@@ -40,7 +49,7 @@ def _ensure_mediapipe_model() -> str:
     model_path = cache_dir / "face_landmarker.task"
     if model_path.exists():
         return str(model_path)
-    print("[UBFC] Downloading MediaPipe face_landmarker model...")
+    print("[PURE] Downloading MediaPipe face_landmarker model...")
     import urllib.request
     url = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task"
     urllib.request.urlretrieve(url, str(model_path))
@@ -97,48 +106,32 @@ def detect_face_bbox(detector, frame_rgb: np.ndarray) -> Optional[Tuple[int, int
     return (x1, y1, x2, y2)
 
 
-def process_video(video_path: str, detector) -> Optional[Tuple[np.ndarray, float, int]]:
+def read_pure_frames(frame_dir: str, detector) -> Optional[np.ndarray]:
     """
-    Extract face-cropped frames, subsampled to ~TARGET_FPS.
+    Read PNG frames from PURE session, detect/crop face, resize to INPUT_SIZE.
 
     Returns:
-        (frames [N,72,72,3] uint8, actual_fps, frame_interval) or None.
+        [N, 72, 72, 3] uint8 array or None.
     """
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
+    all_png = sorted(glob.glob(os.path.join(frame_dir, "*.png")))
+    if len(all_png) < CHUNK_LENGTH:
         return None
-
-    src_fps = cap.get(cv2.CAP_PROP_FPS)
-    if src_fps <= 0:
-        cap.release()
-        return None
-
-    frame_interval = max(1, round(src_fps / TARGET_FPS))
-    actual_fps = src_fps / frame_interval
 
     frames = []
-    frame_idx = 0
-    sampled_idx = 0
-    consecutive_misses = 0
     last_bbox = None
+    consecutive_misses = 0
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        if frame_idx % frame_interval != 0:
-            frame_idx += 1
+    for idx, png_path in enumerate(all_png):
+        img = cv2.imread(png_path)
+        if img is None:
             continue
-        frame_idx += 1
+        frame_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-        if sampled_idx % DETECT_EVERY_N == 0 or last_bbox is None:
+        # Face detection every N frames
+        if idx % DETECT_EVERY_N == 0 or last_bbox is None:
             bbox = detect_face_bbox(detector, frame_rgb)
         else:
             bbox = last_bbox
-        sampled_idx += 1
 
         if bbox is None:
             consecutive_misses += 1
@@ -156,42 +149,52 @@ def process_video(video_path: str, detector) -> Optional[Tuple[np.ndarray, float
         crop = frame_rgb[y1:y2, x1:x2]
         if crop.size == 0:
             continue
-
         crop_resized = cv2.resize(crop, (INPUT_SIZE, INPUT_SIZE), interpolation=cv2.INTER_LINEAR)
         frames.append(crop_resized)
-
-    cap.release()
 
     if len(frames) < CHUNK_LENGTH:
         return None
 
-    return np.array(frames, dtype=np.uint8), actual_fps, frame_interval
+    return np.array(frames, dtype=np.uint8)
 
 
-def load_ubfc_ground_truth(gt_path: str) -> Optional[np.ndarray]:
+def read_pure_labels(json_path: str, n_frames: int) -> Optional[Tuple[np.ndarray, float]]:
     """
-    Load UBFC ground_truth.txt — line 0 is BVP signal (one value per frame).
-    Returns [N] float32 array.
-    """
-    with open(gt_path, 'r') as f:
-        lines = f.readlines()
+    Read BVP waveform and SpO2 from PURE JSON, resample to n_frames.
 
-    if len(lines) < 1:
+    Returns:
+        (bvp [n_frames] float32, spo2_mean float) or None.
+    """
+    with open(json_path, 'r') as f:
+        data = json.load(f)
+
+    packages = data.get("/FullPackage", [])
+    if len(packages) < CHUNK_LENGTH:
         return None
 
-    bvp_values = [float(v) for v in lines[0].strip().split()]
-    if len(bvp_values) < CHUNK_LENGTH:
-        return None
+    bvp_raw = np.array([p["Value"]["waveform"] for p in packages], dtype=np.float32)
+    spo2_raw = np.array([p["Value"]["o2saturation"] for p in packages], dtype=np.float32)
 
-    return np.array(bvp_values, dtype=np.float32)
+    # Resample BVP from ~31Hz to match video frame count
+    bvp_resampled = np.interp(
+        np.linspace(0, len(bvp_raw) - 1, n_frames),
+        np.arange(len(bvp_raw)),
+        bvp_raw,
+    ).astype(np.float32)
+
+    spo2_mean = float(np.mean(spo2_raw))
+
+    return bvp_resampled, spo2_mean
 
 
 def main():
-    parser = argparse.ArgumentParser(description="UBFC-rPPG preprocessing to NPY chunks")
+    parser = argparse.ArgumentParser(description="PURE dataset preprocessing to NPY chunks")
     parser.add_argument("--input", type=str, required=True,
-                        help="UBFC DATASET_2 directory")
+                        help="PURE dataset root directory")
     parser.add_argument("--output", type=str, required=True,
                         help="Output directory for NPY chunks")
+    parser.add_argument("--skip_existing", action="store_true",
+                        help="Skip sessions that already have chunks")
     args = parser.parse_args()
 
     if not os.path.isdir(args.input):
@@ -200,83 +203,81 @@ def main():
 
     os.makedirs(args.output, exist_ok=True)
 
-    # Collect subject folders
-    subjects = sorted([
+    # Collect session directories (format: XX-YY)
+    sessions = sorted([
         d for d in os.listdir(args.input)
-        if os.path.isdir(os.path.join(args.input, d)) and d.startswith("subject")
+        if os.path.isdir(os.path.join(args.input, d)) and '-' in d
     ])
-    print(f"[UBFC] Found {len(subjects)} subjects")
+    print(f"[PURE] Found {len(sessions)} sessions")
 
     # Create face detector
-    print("[UBFC] Loading MediaPipe FaceLandmarker...")
+    print("[PURE] Loading MediaPipe FaceLandmarker...")
     detector = create_face_detector()
 
     total_chunks = 0
     success_count = 0
     fail_count = 0
 
-    for i, subj in enumerate(subjects):
-        subj_dir = os.path.join(args.input, subj)
-        video_path = os.path.join(subj_dir, "vid.avi")
-        gt_path = os.path.join(subj_dir, "ground_truth.txt")
+    for i, session in enumerate(sessions):
+        session_dir = os.path.join(args.input, session)
+        frame_dir = os.path.join(session_dir, session)  # PNG frames in subfolder
+        json_path = os.path.join(session_dir, f"{session}.json")
 
-        if not os.path.isfile(video_path) or not os.path.isfile(gt_path):
+        if not os.path.isdir(frame_dir) or not os.path.isfile(json_path):
             fail_count += 1
-            print(f"[{i+1}/{len(subjects)}] {subj}: SKIP (missing files)")
+            print(f"[{i+1}/{len(sessions)}] {session}: SKIP (missing files)")
             continue
 
-        # Load BVP ground truth (all frames at source FPS)
-        bvp_full = load_ubfc_ground_truth(gt_path)
-        if bvp_full is None:
+        # Skip existing
+        if args.skip_existing:
+            existing = [f for f in os.listdir(args.output) if f.startswith(session + "_chunk")]
+            if existing:
+                n_existing = len(existing) // 3
+                total_chunks += n_existing
+                print(f"[{i+1}/{len(sessions)}] {session}: SKIP (existing, {n_existing} chunks)")
+                continue
+
+        # Read and crop face frames
+        frames = read_pure_frames(frame_dir, detector)
+        if frames is None:
             fail_count += 1
-            print(f"[{i+1}/{len(subjects)}] {subj}: SKIP (bad ground truth)")
+            print(f"[{i+1}/{len(sessions)}] {session}: SKIP (no face / too short)")
             continue
 
-        # Process video (face crop + subsample to ~30fps)
-        result = process_video(video_path, detector)
-        if result is None:
-            fail_count += 1
-            print(f"[{i+1}/{len(subjects)}] {subj}: SKIP (no face / too short)")
-            continue
-
-        frames, actual_fps, frame_interval = result
         n_frames = frames.shape[0]
 
-        # Subsample BVP to match video frames (same frame_interval)
-        bvp_subsampled = bvp_full[::frame_interval]
-
-        # Align lengths
-        min_len = min(n_frames, len(bvp_subsampled))
-        if min_len < CHUNK_LENGTH:
+        # Read and resample labels
+        labels = read_pure_labels(json_path, n_frames)
+        if labels is None:
             fail_count += 1
-            print(f"[{i+1}/{len(subjects)}] {subj}: SKIP (too short after align: {min_len})")
+            print(f"[{i+1}/{len(sessions)}] {session}: SKIP (bad labels)")
             continue
 
-        frames = frames[:min_len]
-        bvp = bvp_subsampled[:min_len]
+        bvp, spo2_mean = labels
 
         # Save chunks
-        n_chunks = min_len // CHUNK_LENGTH
+        n_chunks = n_frames // CHUNK_LENGTH
         saved = 0
 
         for c in range(n_chunks):
             start = c * CHUNK_LENGTH
             end = start + CHUNK_LENGTH
-            base_name = f"{subj}_chunk{c:03d}"
+            base_name = f"{session}_chunk{c:03d}"
             np.save(os.path.join(args.output, f"{base_name}_input.npy"), frames[start:end])
             np.save(os.path.join(args.output, f"{base_name}_bvp.npy"), bvp[start:end])
+            np.save(os.path.join(args.output, f"{base_name}_spo2.npy"), np.float32(spo2_mean))
             saved += 1
 
         total_chunks += saved
         success_count += 1
-        print(f"[{i+1}/{len(subjects)}] {subj}: {saved} chunks "
-              f"({n_frames} frames, interval={frame_interval}, bvp={len(bvp_full)}) | Total: {total_chunks}")
+        print(f"[{i+1}/{len(sessions)}] {session}: {saved} chunks "
+              f"({n_frames} frames, SpO2={spo2_mean:.1f}) | Total: {total_chunks}")
 
     print()
     print("=" * 60)
-    print(f"UBFC Preprocessing Complete")
-    print(f"  Subjects processed: {success_count}")
-    print(f"  Subjects failed:    {fail_count}")
+    print(f"PURE Preprocessing Complete")
+    print(f"  Sessions processed: {success_count}")
+    print(f"  Sessions failed:    {fail_count}")
     print(f"  Total chunks:       {total_chunks}")
     print(f"  Output:             {args.output}")
     print(f"  Chunk format:       [{CHUNK_LENGTH}, {INPUT_SIZE}, {INPUT_SIZE}, 3] uint8")

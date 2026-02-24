@@ -124,53 +124,72 @@ class ChannelAttention3D(nn.Module):
 
 class MambaBlock(nn.Module):
     """
-    純 PyTorch 自訂 Mamba 風格 Selective SSM Block。
+    Mamba Selective SSM Block — 忠實復現原論文邏輯（Gu & Dao, 2023）。
     不依賴 mamba-ssm CUDA extension，可在任何 PyTorch 環境執行。
 
-    核心概念（來自 Gu & Dao, Mamba 2023）：
-      1. 閘控架構：y = SSM(conv(x)) ⊙ silu(z)
-      2. Short depthwise conv（d_conv 幀）：局部時序上下文
-      3. Selective SSM：Δ、B、C 由輸入決定（input-dependent）
-         - 離散化：dA[t] = exp(Δ[t] · A)，dB[t] = Δ[t] · B[t]
-         - 遞推：h[t] = dA[t] · h[t-1] + dB[t] · u[t]
-         - 輸出：y[t] = C[t] · h[t]
-      4. 殘差連接
+    與原版完全一致的設計：
+      1. dt_rank（低秩 Δ 投影）：dt_rank = ceil(channels/16) ≪ d_inner
+         - x_proj: d_inner → (dt_rank + 2·d_state)，一次得到 Δ_raw、B、C
+         - dt_proj: dt_rank → d_inner，展開至完整維度
+      2. dt_proj.bias 初始化至 [dt_min, dt_max] log-uniform 範圍
+         保證訓練初期 Δ 落在合理區間，避免梯度消失或爆炸
+      3. D skip connection：y += D · u（學習殘差旁路）
+      4. 離散化：Ā = exp(Δ·A)，B̄ = Δ·B（與 mamba-ssm 實作一致）
+      5. Sequential scan（數學等價於 parallel scan，T=128 速度可接受）
+      6. 閘控：y = SSM(u) · silu(z)
 
     Input / Output: [B, channels, T]
     """
 
     def __init__(self, channels: int, d_state: int = 16,
-                 d_conv: int = 4, expand: int = 2):
+                 d_conv: int = 4, expand: int = 2,
+                 dt_min: float = 0.001, dt_max: float = 0.1):
         super().__init__()
-        d_inner = channels * expand
-        self.d_inner = d_inner
-        self.d_state = d_state
+        d_inner  = channels * expand
+        dt_rank  = math.ceil(channels / 16)          # 低秩：64/16 = 4
+        self.d_inner  = d_inner
+        self.d_state  = d_state
+        self.dt_rank  = dt_rank
 
-        # Pre-norm
+        # ── Pre-norm ──
         self.norm = nn.LayerNorm(channels)
 
-        # Input linear：x → (x_inner, z_gate)
+        # ── 輸入投影（gated split）──
         self.in_proj  = nn.Linear(channels, d_inner * 2, bias=False)
         self.out_proj = nn.Linear(d_inner,  channels,    bias=False)
 
-        # Short causal depthwise conv（局部時序）
+        # ── Short causal depthwise conv ──
         self.dw_conv = nn.Conv1d(
             d_inner, d_inner, kernel_size=d_conv,
             padding=d_conv - 1, groups=d_inner, bias=True,
         )
 
-        # SSM projections（input-dependent 選擇性）
-        self.dt_proj = nn.Linear(d_inner, d_inner, bias=True)
-        self.B_proj  = nn.Linear(d_inner, d_state,  bias=False)
-        self.C_proj  = nn.Linear(d_inner, d_state,  bias=False)
+        # ── 單一投影：d_inner → (dt_rank, B, C)（原版結構）──
+        self.x_proj = nn.Linear(d_inner, dt_rank + 2 * d_state, bias=False)
 
-        # 可學習對角衰減矩陣 log(-A)，HiPPO-inspired init
-        # A_n = n（n = 1..d_state），確保穩定衰減
-        log_A_init = torch.log(
-            torch.arange(1, d_state + 1, dtype=torch.float32)
-            .unsqueeze(0).expand(d_inner, -1)
-        )                                                       # [d_inner, d_state]
-        self.log_A = nn.Parameter(log_A_init)
+        # ── Δ 展開：dt_rank → d_inner（低秩展開）──
+        self.dt_proj = nn.Linear(dt_rank, d_inner, bias=True)
+
+        # dt_proj 初始化：weight ~ Uniform，bias = softplus⁻¹(dt)
+        # 確保初始 Δ 落在 [dt_min, dt_max] log-uniform 範圍
+        nn.init.uniform_(self.dt_proj.weight, -dt_rank ** -0.5, dt_rank ** -0.5)
+        dt_init = torch.exp(
+            torch.rand(d_inner) * (math.log(dt_max) - math.log(dt_min))
+            + math.log(dt_min)
+        ).clamp(min=1e-4)
+        # softplus⁻¹(y) = log(exp(y) − 1) = y + log(1 − exp(−y))
+        inv_dt = dt_init + torch.log(-torch.expm1(-dt_init))
+        with torch.no_grad():
+            self.dt_proj.bias.copy_(inv_dt)
+
+        # ── A：對角衰減矩陣，HiPPO-inspired init（A_n = n）──
+        A = torch.arange(1, d_state + 1, dtype=torch.float32)
+        self.A_log = nn.Parameter(
+            torch.log(A).unsqueeze(0).expand(d_inner, -1).clone()
+        )                                                        # [d_inner, d_state]
+
+        # ── D：skip connection（可學習）──
+        self.D = nn.Parameter(torch.ones(d_inner))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [B, C, T]
@@ -178,51 +197,51 @@ class MambaBlock(nn.Module):
         residual = x
 
         # Pre-norm
-        x_n = self.norm(x.permute(0, 2, 1))                    # [B, T, C]
+        x_n = self.norm(x.permute(0, 2, 1))                     # [B, T, C]
 
-        # 分割為 SSM 輸入與閘控
-        xz = self.in_proj(x_n)                                  # [B, T, 2·d_inner]
-        x_in, z = xz.chunk(2, dim=-1)                          # [B, T, d_inner]
+        # Gated split
+        xz   = self.in_proj(x_n)                                 # [B, T, 2·d_inner]
+        x_in, z = xz.chunk(2, dim=-1)                            # [B, T, d_inner] each
 
-        # Short causal depthwise conv
+        # Short causal depthwise conv + SiLU
         x_c = self.dw_conv(
-            x_in.permute(0, 2, 1)                              # [B, d_inner, T]
-        )[:, :, :T].permute(0, 2, 1)                           # [B, T, d_inner]
+            x_in.permute(0, 2, 1)                               # [B, d_inner, T]
+        )[:, :, :T].permute(0, 2, 1)                            # [B, T, d_inner]
         x_c = F.silu(x_c)
 
-        # Input-dependent SSM 參數
-        dt    = F.softplus(self.dt_proj(x_c))                  # [B, T, d_inner]  > 0
-        B_seq = self.B_proj(x_c)                               # [B, T, d_state]
-        C_seq = self.C_proj(x_c)                               # [B, T, d_state]
+        # SSM 參數（單一投影，原版結構）
+        x_dbl = self.x_proj(x_c)                                 # [B, T, dt_rank+2·d_state]
+        dt_raw, B_seq, C_seq = x_dbl.split(
+            [self.dt_rank, self.d_state, self.d_state], dim=-1
+        )
+        dt = F.softplus(self.dt_proj(dt_raw))                    # [B, T, d_inner] > 0
 
-        # 離散化 A：Ā[t] = exp(Δ[t] · (−exp(log_A)))
-        A_neg = -torch.exp(self.log_A.float())                 # [d_inner, d_state]
+        # A（永遠為負，保證衰減穩定）
+        A = -torch.exp(self.A_log.float())                       # [d_inner, d_state]
+
+        # 離散化：Ā = exp(Δ·A)，B̄ = Δ·B（與 mamba-ssm 實作一致）
         dA = torch.exp(
-            dt.unsqueeze(-1) * A_neg.unsqueeze(0).unsqueeze(0)
-        )                                                       # [B, T, d_inner, d_state]
-
-        # dB[t] = Δ[t] ⊗ B[t]：[B, T, d_inner, d_state]
-        dB = dt.unsqueeze(-1) * B_seq.unsqueeze(-2)
-
-        # u[t]：[B, T, d_inner, 1]
-        u = x_c.unsqueeze(-1)
+            dt.unsqueeze(-1) * A.unsqueeze(0).unsqueeze(0)
+        )                                                        # [B, T, d_inner, d_state]
+        dB = dt.unsqueeze(-1) * B_seq.unsqueeze(-2)             # [B, T, d_inner, d_state]
 
         # Sequential scan：h[t] = dA[t]·h[t-1] + dB[t]·u[t]
-        # T=128 的 loop 在 RTX 4060 Ti 上約 5-15ms，訓練可接受
-        h = torch.zeros(
-            B_batch, self.d_inner, self.d_state,
-            device=x.device, dtype=x.dtype,
-        )
+        u = x_c                                                  # [B, T, d_inner]
+        h = torch.zeros(B_batch, self.d_inner, self.d_state,
+                        device=x.device, dtype=x.dtype)
         ys = []
         for t in range(T):
-            h = dA[:, t] * h + dB[:, t] * u[:, t]             # [B, d_inner, d_state]
-            y_t = (h * C_seq[:, t].unsqueeze(1)).sum(-1)       # [B, d_inner]
+            h = dA[:, t] * h + dB[:, t] * u[:, t].unsqueeze(-1)  # [B, d_inner, d_state]
+            y_t = (h * C_seq[:, t].unsqueeze(1)).sum(-1)           # [B, d_inner]
             ys.append(y_t)
-        y_ssm = torch.stack(ys, dim=1)                         # [B, T, d_inner]
+        y_ssm = torch.stack(ys, dim=1)                           # [B, T, d_inner]
+
+        # D skip connection（y += D · u）
+        y_ssm = y_ssm + self.D * u                               # [B, T, d_inner]
 
         # 輸出閘控 + 投影
-        y = y_ssm * F.silu(z)                                   # [B, T, d_inner]
-        y = self.out_proj(y).permute(0, 2, 1)                  # [B, C, T]
+        y = y_ssm * F.silu(z)                                    # [B, T, d_inner]
+        y = self.out_proj(y).permute(0, 2, 1)                   # [B, C, T]
 
         return y + residual
 

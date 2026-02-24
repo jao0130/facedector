@@ -21,6 +21,8 @@ def main():
     parser = argparse.ArgumentParser(description="Unified training: face detection + rPPG")
     parser.add_argument('--config', type=str, required=True, help='Path to YAML config file')
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume from')
+    parser.add_argument('--test', action='store_true', help='Run test evaluation only (skip training)')
+    parser.add_argument('--checkpoint', type=str, default=None, help='Checkpoint path for --test mode')
     parser.add_argument('--opts', nargs='+', default=[], help='Override config options (KEY VALUE pairs)')
     args = parser.parse_args()
 
@@ -63,17 +65,36 @@ def main():
     elif cfg.TASK == "rppg_semi":
         from data.dataset_rppg import create_rppg_semi_dataloaders
         from trainers.rppg_semi_trainer import rPPGSemiTrainer
+        import torch
 
         data_loaders = create_rppg_semi_dataloaders(cfg)
         trainer = rPPGSemiTrainer(cfg)
 
-        history = trainer.train(data_loaders)
-        print(f"\n[Done] Semi-supervised rPPG training complete.")
+        if args.test:
+            # Test-only mode: load checkpoint and evaluate
+            ckpt_path = args.checkpoint
+            if ckpt_path is None:
+                ckpt_path = os.path.join(cfg.OUTPUT.CHECKPOINT_DIR, "rppg_fcatt_128f_72px_best.pth")
+            if not os.path.isfile(ckpt_path):
+                print(f"[Error] Checkpoint not found: {ckpt_path}")
+                sys.exit(1)
+            ckpt = torch.load(ckpt_path, map_location=cfg.DEVICE, weights_only=False)
+            trainer.student.load_state_dict(ckpt['model_state_dict'])
+            print(f"[Test] Loaded checkpoint: {ckpt_path}")
 
-        # Run test if test set available
-        if 'test' in data_loaders:
-            print("\n[Test] Evaluating on test set...")
-            trainer.test(data_loaders['test'])
+            if 'test' in data_loaders:
+                print("[Test] Evaluating on test set...")
+                trainer.test(data_loaders['test'])
+            else:
+                print("[Error] No test set found. Check TEST_CACHED_PATH.")
+        else:
+            history = trainer.train(data_loaders)
+            print(f"\n[Done] Semi-supervised rPPG training complete.")
+
+            # Run test if test set available
+            if 'test' in data_loaders:
+                print("\n[Test] Evaluating on test set...")
+                trainer.test(data_loaders['test'])
 
     else:
         print(f"[Error] Unknown task: {cfg.TASK}. Use 'face_detection', 'rppg', or 'rppg_semi'.")

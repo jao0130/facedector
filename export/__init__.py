@@ -1,1 +1,1 @@
-# Export module for TFLite and TensorFlow.js conversion
+# Export module for ONNX and TorchScript conversion

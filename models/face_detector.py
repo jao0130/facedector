@@ -1,102 +1,144 @@
 """
-Complete face detection model combining backbone, detection head, and landmark head.
-BlazeFace-inspired lightweight architecture for mobile deployment.
+Face detection model: MobileNetV2 + FPN + detection heads.
+Bbox/confidence use global pooling; landmarks use spatial soft-argmax for positional accuracy.
 """
 
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers
-from typing import Dict, Optional, Tuple
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import Dict
 
 from .backbone import create_mobilenetv2_backbone, FeaturePyramidNeck
 
 
-class FaceDetector(keras.Model):
+class SpatialSoftArgmax(nn.Module):
+    """
+    Spatial soft-argmax: converts feature maps to heatmaps, then extracts
+    (x, y) coordinates via differentiable weighted average.
+
+    Preserves spatial information — critical for landmark localization.
+    """
+
+    def __init__(self, temperature: float = 1.0):
+        super().__init__()
+        self.temperature = temperature
+
+    def forward(self, heatmaps: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            heatmaps: [B, K, H, W] raw logits (one channel per landmark)
+        Returns:
+            coords: [B, K, 2] normalized (x, y) in [0, 1]
+        """
+        B, K, H, W = heatmaps.shape
+
+        # Softmax over spatial dimensions
+        flat = heatmaps.view(B, K, -1) / self.temperature
+        weights = F.softmax(flat, dim=-1)  # [B, K, H*W]
+
+        # Create coordinate grids normalized to [0, 1]
+        # Use (0.5/W, 1.5/W, ...) so coords are pixel-centered
+        grid_x = torch.linspace(0.5 / W, 1.0 - 0.5 / W, W, device=heatmaps.device)
+        grid_y = torch.linspace(0.5 / H, 1.0 - 0.5 / H, H, device=heatmaps.device)
+        grid_y, grid_x = torch.meshgrid(grid_y, grid_x, indexing='ij')
+
+        grid_x = grid_x.reshape(-1)  # [H*W]
+        grid_y = grid_y.reshape(-1)
+
+        # Weighted sum of coordinates
+        x = (weights * grid_x.unsqueeze(0).unsqueeze(0)).sum(dim=-1)  # [B, K]
+        y = (weights * grid_y.unsqueeze(0).unsqueeze(0)).sum(dim=-1)
+
+        return torch.stack([x, y], dim=-1)  # [B, K, 2]
+
+
+class FaceDetector(nn.Module):
     """
     Lightweight face detector with bounding box and landmark prediction.
 
     Architecture:
-    - MobileNetV2 backbone (width multiplier configurable)
-    - Feature Pyramid Network for multi-scale features
-    - Single detection head operating on fused features
-    - Landmark regression head for 5 facial keypoints
+        - Backbone: MobileNetV2 (multi-scale)
+        - Neck: FPN (feature fusion)
+        - Bbox/Confidence: Global pool -> FC (good for global regression)
+        - Landmarks: Conv heatmaps -> Spatial Soft-Argmax (preserves spatial info)
+
+    Input: [B, 3, H, W] (NCHW, float32, range [0, 1])
+    Output: dict with:
+        - 'bbox': [B, 4] (x_min, y_min, x_max, y_max), normalized [0, 1]
+        - 'landmarks': [B, 5, 2] (x, y per landmark), normalized [0, 1]
+        - 'confidence': [B, 1] sigmoid probability
     """
 
-    def __init__(
-        self,
-        input_size: int = 224,
-        backbone_alpha: float = 0.5,
-        num_landmarks: int = 5,
-        num_anchors: int = 6,
-        pretrained: bool = True,
-        **kwargs
-    ):
-        super().__init__(**kwargs)
+    def __init__(self, cfg=None, input_size=256, backbone_alpha=0.5,
+                 num_landmarks=5, fpn_channels=64, pretrained=True):
+        super().__init__()
+
+        if cfg is not None:
+            input_size = cfg.FACE_MODEL.INPUT_SIZE
+            backbone_alpha = cfg.FACE_MODEL.BACKBONE_ALPHA
+            num_landmarks = cfg.FACE_MODEL.NUM_LANDMARKS
+            fpn_channels = cfg.FACE_MODEL.FPN_CHANNELS
+            pretrained = cfg.FACE_MODEL.PRETRAINED
 
         self.input_size = input_size
         self.num_landmarks = num_landmarks
-        self.num_anchors = num_anchors
 
-        # Backbone
-        self.backbone = create_mobilenetv2_backbone(
-            input_shape=(input_size, input_size, 3),
+        # Backbone: MobileNetV2 multi-scale features
+        self.backbone, out_channels_list = create_mobilenetv2_backbone(
+            input_size=input_size,
             alpha=backbone_alpha,
             pretrained=pretrained,
         )
 
-        # Feature pyramid neck
-        self.fpn = FeaturePyramidNeck(out_channels=64)
+        # FPN neck
+        self.fpn = FeaturePyramidNeck(
+            in_channels_list=out_channels_list,
+            out_channels=fpn_channels,
+        )
 
-        # Global feature aggregation for single face detection
-        self.global_pool = layers.GlobalAveragePooling2D()
-        self.fc_bbox = layers.Dense(4)  # Direct bbox regression
-        self.fc_landmarks = layers.Dense(num_landmarks * 2)  # Direct landmark regression
-        self.fc_confidence = layers.Dense(1)  # Face confidence
+        # ── Bbox + Confidence head (global pooling is fine for these) ──
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc_shared = nn.Sequential(
+            nn.Linear(fpn_channels, 128),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+        )
+        self.fc_bbox = nn.Linear(128, 4)
+        self.fc_confidence = nn.Linear(128, 1)
 
-    def call(self, inputs, training=None):
-        """
-        Forward pass.
+        # ── Landmark head (spatial — preserves positional information) ──
+        self.landmark_conv = nn.Sequential(
+            nn.Conv2d(fpn_channels, fpn_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(fpn_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(fpn_channels, num_landmarks, 1),  # one heatmap per landmark
+        )
+        self.spatial_softargmax = SpatialSoftArgmax(temperature=1.0)
 
-        Args:
-            inputs: Input images [B, H, W, 3]
-            training: Training mode flag
-
-        Returns:
-            Dictionary containing:
-            - bbox: Predicted bounding boxes [B, 4] (x_min, y_min, x_max, y_max)
-            - landmarks: Predicted landmarks [B, 5, 2] (x, y per landmark)
-            - confidence: Face confidence score [B, 1]
-        """
+    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         # Extract multi-scale features
-        features = self.backbone(inputs, training=training)
+        features = self.backbone(x)
 
         # Apply FPN
-        fpn_features = self.fpn(features, training=training)
+        fpn_features = self.fpn(features)
 
-        # Use the second-to-last scale for best balance
-        # (1/8 scale has good resolution and receptive field)
-        main_feature = fpn_features[1]
+        # Use second scale (1/8) — 32x32 for 256px input
+        main_feature = fpn_features[1]  # [B, fpn_channels, H/8, W/8]
 
-        # Global pooling for single-face prediction
-        global_feature = self.global_pool(main_feature)
+        # ── Bbox + Confidence (global) ──
+        pooled = self.global_pool(main_feature).flatten(1)  # [B, fpn_channels]
+        shared = self.fc_shared(pooled)  # [B, 128]
 
-        # Predict bbox as (cx, cy, w, h) then convert to (x_min, y_min, x_max, y_max)
-        bbox_raw = self.fc_bbox(global_feature)
-        bbox_cwh = tf.sigmoid(bbox_raw)  # [cx, cy, w, h] all in [0, 1]
-        cx = bbox_cwh[:, 0:1]
-        cy = bbox_cwh[:, 1:2]
-        w = bbox_cwh[:, 2:3]
-        h = bbox_cwh[:, 3:4]
-        bbox = tf.concat([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], axis=-1)
-        bbox = tf.clip_by_value(bbox, 0.0, 1.0)
+        bbox_raw = torch.sigmoid(self.fc_bbox(shared))  # [B, 4]
+        cx, cy, w, h = bbox_raw[:, 0:1], bbox_raw[:, 1:2], bbox_raw[:, 2:3], bbox_raw[:, 3:4]
+        bbox = torch.cat([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], dim=-1)
+        bbox = bbox.clamp(0.0, 1.0)
 
-        # Predict landmarks
-        landmarks_raw = self.fc_landmarks(global_feature)
-        landmarks = tf.sigmoid(landmarks_raw)
-        landmarks = tf.reshape(landmarks, [-1, self.num_landmarks, 2])
+        confidence = torch.sigmoid(self.fc_confidence(shared))  # [B, 1]
 
-        # Predict confidence
-        confidence = tf.sigmoid(self.fc_confidence(global_feature))
+        # ── Landmarks (spatial) ──
+        heatmaps = self.landmark_conv(main_feature)  # [B, 5, H/8, W/8]
+        landmarks = self.spatial_softargmax(heatmaps)  # [B, 5, 2]
 
         return {
             'bbox': bbox,
@@ -104,213 +146,62 @@ class FaceDetector(keras.Model):
             'confidence': confidence,
         }
 
-    def compute_loss(
-        self,
-        predictions: Dict[str, tf.Tensor],
-        targets: Tuple[tf.Tensor, tf.Tensor, tf.Tensor],
-        loss_weights: Optional[Dict[str, float]] = None,
-    ) -> Tuple[tf.Tensor, Dict[str, tf.Tensor]]:
-        """
-        Compute combined loss.
 
-        Args:
-            predictions: Model predictions dictionary
-            targets: Tuple of (images, gt_bbox, gt_landmarks)
-            loss_weights: Dictionary of loss weights
+class FaceDetectorLite(nn.Module):
+    """Ultra-lightweight face detector for mobile inference."""
 
-        Returns:
-            total_loss: Combined loss scalar
-            loss_dict: Dictionary of individual losses
-        """
-        if loss_weights is None:
-            loss_weights = {
-                'bbox': 1.0,
-                'landmark': 0.5,
-                'confidence': 1.0,
-            }
-
-        _, gt_bbox, gt_landmarks = targets
-        pred_bbox = predictions['bbox']
-        pred_landmarks = predictions['landmarks']
-        pred_confidence = predictions['confidence']
-
-        # Bounding box loss (Smooth L1)
-        bbox_loss = smooth_l1_loss(pred_bbox, gt_bbox)
-
-        # Landmark loss (Smooth L1)
-        landmark_loss = smooth_l1_loss(
-            pred_landmarks,
-            gt_landmarks,
-        )
-
-        # Confidence loss (Binary cross-entropy)
-        # All samples have faces, so target is 1
-        confidence_target = tf.ones_like(pred_confidence)
-        confidence_loss = tf.reduce_mean(
-            keras.losses.binary_crossentropy(
-                confidence_target,
-                pred_confidence,
-            )
-        )
-
-        # Combined loss
-        total_loss = (
-            loss_weights['bbox'] * bbox_loss +
-            loss_weights['landmark'] * landmark_loss +
-            loss_weights['confidence'] * confidence_loss
-        )
-
-        loss_dict = {
-            'bbox_loss': bbox_loss,
-            'landmark_loss': landmark_loss,
-            'confidence_loss': confidence_loss,
-            'total_loss': total_loss,
-        }
-
-        return total_loss, loss_dict
-
-    def get_config(self):
-        config = super().get_config()
-        config.update({
-            'input_size': self.input_size,
-            'num_landmarks': self.num_landmarks,
-            'num_anchors': self.num_anchors,
-        })
-        return config
-
-
-def smooth_l1_loss(pred: tf.Tensor, target: tf.Tensor, beta: float = 1.0) -> tf.Tensor:
-    """
-    Smooth L1 loss (Huber loss).
-
-    Args:
-        pred: Predictions
-        target: Ground truth
-        beta: Threshold for switching between L1 and L2
-
-    Returns:
-        Loss scalar
-    """
-    diff = tf.abs(pred - target)
-    loss = tf.where(
-        diff < beta,
-        0.5 * diff ** 2 / beta,
-        diff - 0.5 * beta,
-    )
-    return tf.reduce_mean(loss)
-
-
-def wing_loss(pred: tf.Tensor, target: tf.Tensor, w: float = 10.0, epsilon: float = 2.0) -> tf.Tensor:
-    """
-    Wing loss for landmark regression (better for small errors).
-
-    Args:
-        pred: Predicted landmarks
-        target: Ground truth landmarks
-        w: Wing loss width parameter
-        epsilon: Curvature parameter
-
-    Returns:
-        Loss scalar
-    """
-    diff = tf.abs(pred - target)
-    c = w * (1.0 - tf.math.log(1.0 + w / epsilon))
-
-    loss = tf.where(
-        diff < w,
-        w * tf.math.log(1.0 + diff / epsilon),
-        diff - c,
-    )
-    return tf.reduce_mean(loss)
-
-
-def create_face_detector(config: Dict, pretrained: bool = True) -> FaceDetector:
-    """Create face detector model from config.
-
-    Args:
-        config: Model configuration dictionary
-        pretrained: Whether to load ImageNet backbone weights (False for inference with custom weights)
-    """
-    model_config = config.get('model', {})
-
-    model = FaceDetector(
-        input_size=model_config.get('input_size', 224),
-        backbone_alpha=model_config.get('backbone_alpha', 0.5),
-        num_landmarks=model_config.get('num_landmarks', 5),
-        num_anchors=model_config.get('num_anchors', 6),
-        pretrained=pretrained,
-    )
-
-    return model
-
-
-class FaceDetectorLite(keras.Model):
-    """
-    Ultra-lightweight face detector for mobile inference.
-    Simplified architecture for maximum speed.
-    """
-
-    def __init__(
-        self,
-        input_size: int = 128,
-        num_landmarks: int = 5,
-        **kwargs
-    ):
-        super().__init__(**kwargs)
-
+    def __init__(self, input_size: int = 128, num_landmarks: int = 5):
+        super().__init__()
         self.input_size = input_size
         self.num_landmarks = num_landmarks
 
-        # Lightweight backbone
-        self.features = keras.Sequential([
-            # Initial conv
-            layers.Conv2D(16, 3, strides=2, padding='same'),
-            layers.BatchNormalization(),
-            layers.ReLU(),
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 16, 3, stride=2, padding=1),
+            nn.BatchNorm2d(16),
+            nn.ReLU(inplace=True),
+            self._dsconv_block(16, 32, stride=2),
+            self._dsconv_block(32, 64, stride=2),
+            self._dsconv_block(64, 64, stride=1),
+            self._dsconv_block(64, 128, stride=2),
+            self._dsconv_block(128, 128, stride=1),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+        )
 
-            # Depthwise separable blocks
-            self._dsconv_block(32, stride=2),
-            self._dsconv_block(64, stride=2),
-            self._dsconv_block(64, stride=1),
-            self._dsconv_block(128, stride=2),
-            self._dsconv_block(128, stride=1),
+        self.fc_bbox = nn.Linear(128, 4)
+        self.fc_landmarks = nn.Linear(128, num_landmarks * 2)
+        self.fc_confidence = nn.Linear(128, 1)
 
-            # Global pooling
-            layers.GlobalAveragePooling2D(),
-        ])
+    @staticmethod
+    def _dsconv_block(in_ch, out_ch, stride=1):
+        return nn.Sequential(
+            nn.Conv2d(in_ch, in_ch, 3, stride=stride, padding=1, groups=in_ch, bias=False),
+            nn.BatchNorm2d(in_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_ch, out_ch, 1, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+        )
 
-        # Output heads
-        self.fc_bbox = layers.Dense(4)
-        self.fc_landmarks = layers.Dense(num_landmarks * 2)
-        self.fc_confidence = layers.Dense(1)
+    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        feat = self.features(x)
 
-    def _dsconv_block(self, filters, stride=1):
-        return keras.Sequential([
-            layers.DepthwiseConv2D(3, strides=stride, padding='same'),
-            layers.BatchNormalization(),
-            layers.ReLU(),
-            layers.Conv2D(filters, 1),
-            layers.BatchNormalization(),
-            layers.ReLU(),
-        ])
+        bbox_raw = torch.sigmoid(self.fc_bbox(feat))
+        cx, cy, w, h = bbox_raw[:, 0:1], bbox_raw[:, 1:2], bbox_raw[:, 2:3], bbox_raw[:, 3:4]
+        bbox = torch.cat([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], dim=-1)
+        bbox = bbox.clamp(0.0, 1.0)
 
-    def call(self, inputs, training=None):
-        features = self.features(inputs, training=training)
-
-        bbox_cwh = tf.sigmoid(self.fc_bbox(features))  # [cx, cy, w, h]
-        cx = bbox_cwh[:, 0:1]
-        cy = bbox_cwh[:, 1:2]
-        w = bbox_cwh[:, 2:3]
-        h = bbox_cwh[:, 3:4]
-        bbox = tf.concat([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], axis=-1)
-        bbox = tf.clip_by_value(bbox, 0.0, 1.0)
-
-        landmarks = tf.sigmoid(self.fc_landmarks(features))
-        landmarks = tf.reshape(landmarks, [-1, self.num_landmarks, 2])
-        confidence = tf.sigmoid(self.fc_confidence(features))
+        landmarks = torch.sigmoid(self.fc_landmarks(feat))
+        landmarks = landmarks.view(-1, self.num_landmarks, 2)
+        confidence = torch.sigmoid(self.fc_confidence(feat))
 
         return {
             'bbox': bbox,
             'landmarks': landmarks,
             'confidence': confidence,
         }
+
+
+def create_face_detector(cfg, pretrained: bool = True) -> FaceDetector:
+    """Create face detector model from config."""
+    return FaceDetector(cfg=cfg)

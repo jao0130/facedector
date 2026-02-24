@@ -285,7 +285,8 @@ def convert_wider_face(
             stats['processed'] += 1
 
     finally:
-        generator.close()
+        if generator is not None:
+            generator.close()
 
     # Save per-category JSON files
     print("\nSaving labels...")

@@ -1,357 +1,140 @@
 """
-Data augmentation for face detection training.
-Handles rotation, scaling, blur, and color jitter to simulate head movement.
+Data augmentation for face detection training using albumentations.
+Handles rotation, scaling, perspective, blur, color jitter, and horizontal flip
+with landmark coordination.
 """
 
-import tensorflow as tf
 import numpy as np
-from typing import Dict, Tuple
+import albumentations as A
+from typing import Tuple
+
+
+# Landmark swap indices for horizontal flip: left_eye(0)<->right_eye(1), left_mouth(3)<->right_mouth(4)
+FLIP_LANDMARK_INDICES = [1, 0, 2, 4, 3]
 
 
 class FaceAugmentation:
-    """TensorFlow-based augmentation for face detection data."""
+    """Albumentations-based augmentation for face detection data."""
 
-    def __init__(
-        self,
-        rotation_range: float = 30.0,
-        scale_range: Tuple[float, float] = (0.8, 1.2),
-        brightness_range: float = 0.2,
-        contrast_range: float = 0.2,
-        blur_prob: float = 0.3,
-        noise_prob: float = 0.2,
-        horizontal_flip: bool = True,
-    ):
-        """
-        Initialize augmentation parameters.
+    def __init__(self, cfg=None, rotation_range=30.0, scale_min=0.7, scale_max=1.3,
+                 brightness=0.3, contrast=0.3, saturation=0.2, hue=0.1,
+                 blur_prob=0.3, blur_limit=7, noise_prob=0.2,
+                 horizontal_flip=True, perspective_prob=0.3):
 
-        Args:
-            rotation_range: Maximum rotation angle in degrees
-            scale_range: (min_scale, max_scale) for random scaling
-            brightness_range: Random brightness adjustment range
-            contrast_range: Random contrast adjustment range
-            blur_prob: Probability of applying blur
-            noise_prob: Probability of adding Gaussian noise
-            horizontal_flip: Whether to apply random horizontal flip
-        """
-        self.rotation_range = rotation_range
-        self.scale_range = scale_range
-        self.brightness_range = brightness_range
-        self.contrast_range = contrast_range
-        self.blur_prob = blur_prob
-        self.noise_prob = noise_prob
+        if cfg is not None:
+            rotation_range = cfg.AUGMENTATION.ROTATION_RANGE
+            scale_min = cfg.AUGMENTATION.SCALE_MIN
+            scale_max = cfg.AUGMENTATION.SCALE_MAX
+            brightness = cfg.AUGMENTATION.BRIGHTNESS
+            contrast = cfg.AUGMENTATION.CONTRAST
+            saturation = cfg.AUGMENTATION.SATURATION
+            hue = cfg.AUGMENTATION.HUE
+            blur_prob = cfg.AUGMENTATION.BLUR_PROB
+            blur_limit = cfg.AUGMENTATION.BLUR_LIMIT
+            noise_prob = cfg.AUGMENTATION.NOISE_PROB
+            horizontal_flip = cfg.AUGMENTATION.HORIZONTAL_FLIP
+            perspective_prob = cfg.AUGMENTATION.PERSPECTIVE_PROB
+
         self.horizontal_flip = horizontal_flip
 
-    def __call__(
-        self,
-        image: tf.Tensor,
-        bbox: tf.Tensor,
-        landmarks: tf.Tensor,
-        training: bool = True,
-    ) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
+        # Build albumentations pipeline (without flip — handled manually for landmarks)
+        transforms_list = [
+            A.Rotate(limit=rotation_range, p=0.5, border_mode=0),
+            A.RandomScale(scale_limit=(scale_min - 1.0, scale_max - 1.0), p=0.5),
+            A.PadIfNeeded(min_height=None, min_width=None,
+                          pad_height_divisor=1, pad_width_divisor=1),
+            A.Perspective(scale=(0.02, 0.06), p=perspective_prob),
+            A.ColorJitter(brightness=brightness, contrast=contrast,
+                          saturation=saturation, hue=hue, p=0.5),
+            A.OneOf([
+                A.GaussianBlur(blur_limit=(3, blur_limit), p=1.0),
+                A.MotionBlur(blur_limit=(3, 7), p=1.0),
+            ], p=blur_prob),
+            A.GaussNoise(p=noise_prob),
+            A.CoarseDropout(max_holes=1, max_height=0.15, max_width=0.15,
+                            fill_value=0, p=0.15),
+        ]
+
+        self.transform = A.Compose(
+            transforms_list,
+            bbox_params=A.BboxParams(format='albumentations', label_fields=['labels'],
+                                     min_visibility=0.3),
+            keypoint_params=A.KeypointParams(format='xy', remove_invisible=False),
+        )
+
+    def __call__(self, image: np.ndarray, bbox: np.ndarray,
+                 landmarks: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        Apply augmentation to image and labels.
+        Apply augmentation.
 
         Args:
-            image: Input image tensor [H, W, 3]
-            bbox: Bounding box [x_min, y_min, x_max, y_max] normalized
-            landmarks: Landmarks [5, 2] normalized (x, y)
-            training: Whether in training mode
+            image: [H, W, 3] uint8 RGB
+            bbox: [4] float32 normalized (x_min, y_min, x_max, y_max) in [0, 1]
+            landmarks: [5, 2] float32 normalized
 
         Returns:
             Augmented (image, bbox, landmarks)
         """
-        if not training:
-            return image, bbox, landmarks
+        h, w = image.shape[:2]
 
-        # Random horizontal flip
-        if self.horizontal_flip:
-            image, bbox, landmarks = self._random_flip(image, bbox, landmarks)
+        # Convert normalized coords to pixel coords for albumentations
+        bbox_pixel = bbox.copy()
+        bbox_pixel = np.clip(bbox_pixel, 0.0, 1.0)
 
-        # Random rotation
-        if self.rotation_range > 0:
-            image, bbox, landmarks = self._random_rotation(image, bbox, landmarks)
+        kps_pixel = []
+        for lm in landmarks:
+            kps_pixel.append((float(lm[0] * w), float(lm[1] * h)))
 
-        # Random scale
-        if self.scale_range[0] != 1.0 or self.scale_range[1] != 1.0:
-            image, bbox, landmarks = self._random_scale(image, bbox, landmarks)
+        # Manual horizontal flip (to handle landmark swapping)
+        if self.horizontal_flip and np.random.random() < 0.5:
+            image = image[:, ::-1, :].copy()
+            bbox_pixel = np.array([1.0 - bbox_pixel[2], bbox_pixel[1],
+                                   1.0 - bbox_pixel[0], bbox_pixel[3]])
+            landmarks_flipped = landmarks.copy()
+            landmarks_flipped[:, 0] = 1.0 - landmarks[:, 0]
+            landmarks = landmarks_flipped[FLIP_LANDMARK_INDICES]
+            kps_pixel = [(float(lm[0] * w), float(lm[1] * h)) for lm in landmarks]
+            bbox_pixel = np.clip(bbox_pixel, 0.0, 1.0)
 
-        # Color augmentation
-        image = self._color_augmentation(image)
-
-        # Random blur
-        if self.blur_prob > 0:
-            image = self._random_blur(image)
-
-        # Random noise
-        if self.noise_prob > 0:
-            image = self._random_noise(image)
-
-        return image, bbox, landmarks
-
-    def _random_flip(
-        self,
-        image: tf.Tensor,
-        bbox: tf.Tensor,
-        landmarks: tf.Tensor,
-    ) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
-        """Random horizontal flip with landmark reordering."""
-        do_flip = tf.random.uniform([]) > 0.5
-
-        def flip():
-            flipped_image = tf.image.flip_left_right(image)
-
-            # Flip bbox x coordinates
-            flipped_bbox = tf.stack([
-                1.0 - bbox[2],  # new x_min = 1 - old x_max
-                bbox[1],       # y_min unchanged
-                1.0 - bbox[0],  # new x_max = 1 - old x_min
-                bbox[3],       # y_max unchanged
-            ])
-
-            # Flip landmarks x coordinates and swap left/right
-            # Order: [left_eye, right_eye, nose, left_mouth, right_mouth]
-            flipped_landmarks = tf.stack([
-                [1.0 - landmarks[1, 0], landmarks[1, 1]],  # right_eye -> left_eye
-                [1.0 - landmarks[0, 0], landmarks[0, 1]],  # left_eye -> right_eye
-                [1.0 - landmarks[2, 0], landmarks[2, 1]],  # nose
-                [1.0 - landmarks[4, 0], landmarks[4, 1]],  # right_mouth -> left_mouth
-                [1.0 - landmarks[3, 0], landmarks[3, 1]],  # left_mouth -> right_mouth
-            ])
-
-            return flipped_image, flipped_bbox, flipped_landmarks
-
-        def no_flip():
-            return image, bbox, landmarks
-
-        return tf.cond(do_flip, flip, no_flip)
-
-    def _random_rotation(
-        self,
-        image: tf.Tensor,
-        bbox: tf.Tensor,
-        landmarks: tf.Tensor,
-    ) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
-        """Random rotation with coordinate transformation."""
-        angle = tf.random.uniform(
-            [],
-            minval=-self.rotation_range,
-            maxval=self.rotation_range,
-        )
-        angle_rad = angle * np.pi / 180.0
-
-        # Get image dimensions
-        center_x, center_y = 0.5, 0.5
-
-        # Rotate image
-        rotated_image = self._rotate_image(image, angle_rad)
-
-        # Rotate bbox corners and recompute axis-aligned bbox
-        corners = tf.stack([
-            [bbox[0], bbox[1]],  # top-left
-            [bbox[2], bbox[1]],  # top-right
-            [bbox[2], bbox[3]],  # bottom-right
-            [bbox[0], bbox[3]],  # bottom-left
-        ])
-
-        rotated_corners = self._rotate_points(corners, -angle_rad, center_x, center_y)
-        rotated_bbox = tf.stack([
-            tf.reduce_min(rotated_corners[:, 0]),
-            tf.reduce_min(rotated_corners[:, 1]),
-            tf.reduce_max(rotated_corners[:, 0]),
-            tf.reduce_max(rotated_corners[:, 1]),
-        ])
-        rotated_bbox = tf.clip_by_value(rotated_bbox, 0.0, 1.0)
-
-        # Validate rotated bbox: if too small or degenerate, skip rotation
-        bbox_w = rotated_bbox[2] - rotated_bbox[0]
-        bbox_h = rotated_bbox[3] - rotated_bbox[1]
-        is_valid = tf.logical_and(bbox_w > 0.05, bbox_h > 0.05)
-
-        # Rotate landmarks
-        rotated_landmarks = self._rotate_points(landmarks, -angle_rad, center_x, center_y)
-        rotated_landmarks = tf.clip_by_value(rotated_landmarks, 0.0, 1.0)
-
-        # Return original if rotated bbox is invalid
-        final_image = tf.cond(is_valid, lambda: rotated_image, lambda: image)
-        final_bbox = tf.cond(is_valid, lambda: rotated_bbox, lambda: bbox)
-        final_landmarks = tf.cond(is_valid, lambda: rotated_landmarks, lambda: landmarks)
-
-        return final_image, final_bbox, final_landmarks
-
-    def _rotate_image(self, image: tf.Tensor, angle_rad: tf.Tensor) -> tf.Tensor:
-        """Rotate image using tf.raw_ops."""
-        # Add batch dimension
-        image = tf.expand_dims(image, 0)
-
-        # Create rotation matrix
-        cos_a = tf.cos(angle_rad)
-        sin_a = tf.sin(angle_rad)
-
-        # Transformation matrix for tf.raw_ops.ImageProjectiveTransformV3
-        # [a, b, c, d, e, f, g, h] represents:
-        # x' = (a*x + b*y + c) / (g*x + h*y + 1)
-        # y' = (d*x + e*y + f) / (g*x + h*y + 1)
-        transform = tf.stack([
-            cos_a, -sin_a, 0.5 - 0.5 * cos_a + 0.5 * sin_a,
-            sin_a, cos_a, 0.5 - 0.5 * sin_a - 0.5 * cos_a,
-            0.0, 0.0
-        ])
-        transform = tf.reshape(transform, [1, 8])
-
-        # Apply transformation
-        rotated = tf.raw_ops.ImageProjectiveTransformV3(
-            images=image,
-            transforms=transform,
-            output_shape=tf.shape(image)[1:3],
-            fill_value=0.0,
-            interpolation="BILINEAR",
-            fill_mode="CONSTANT",
-        )
-
-        return rotated[0]
-
-    def _rotate_points(
-        self,
-        points: tf.Tensor,
-        angle_rad: tf.Tensor,
-        center_x: float,
-        center_y: float,
-    ) -> tf.Tensor:
-        """Rotate points around center."""
-        cos_a = tf.cos(angle_rad)
-        sin_a = tf.sin(angle_rad)
-
-        # Translate to origin
-        x = points[:, 0] - center_x
-        y = points[:, 1] - center_y
-
-        # Rotate
-        new_x = x * cos_a - y * sin_a + center_x
-        new_y = x * sin_a + y * cos_a + center_y
-
-        return tf.stack([new_x, new_y], axis=1)
-
-    def _random_scale(
-        self,
-        image: tf.Tensor,
-        bbox: tf.Tensor,
-        landmarks: tf.Tensor,
-    ) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
-        """Random scaling with center crop/pad.
-
-        When scale > 1: image is enlarged then center-cropped
-        When scale < 1: image is shrunk then center-padded
-        """
-        scale = tf.random.uniform(
-            [],
-            minval=self.scale_range[0],
-            maxval=self.scale_range[1],
-        )
-
-        # Scale image
-        shape = tf.shape(image)
-        new_h = tf.cast(tf.cast(shape[0], tf.float32) * scale, tf.int32)
-        new_w = tf.cast(tf.cast(shape[1], tf.float32) * scale, tf.int32)
-        scaled_image = tf.image.resize(image, [new_h, new_w])
-
-        # Crop or pad to original size
-        scaled_image = tf.image.resize_with_crop_or_pad(
-            scaled_image, shape[0], shape[1]
-        )
-
-        # Calculate coordinate transformation
-        # After resize_with_crop_or_pad:
-        # - If scale > 1 (enlarged): center crop removes (scale-1)/2 from each side
-        #   new_coord = (old_coord - (1 - 1/scale)/2) * scale = old_coord * scale - (scale-1)/2
-        # - If scale < 1 (shrunk): center pad adds (1-scale)/2 to each side
-        #   new_coord = old_coord * scale + (1-scale)/2
-
-        offset = (1.0 - scale) / 2.0
-
-        # Transform bbox
-        new_bbox = tf.stack([
-            bbox[0] * scale + offset,
-            bbox[1] * scale + offset,
-            bbox[2] * scale + offset,
-            bbox[3] * scale + offset,
-        ])
-        new_bbox = tf.clip_by_value(new_bbox, 0.0, 1.0)
-
-        # Transform landmarks
-        new_landmarks = landmarks * scale + offset
-        new_landmarks = tf.clip_by_value(new_landmarks, 0.0, 1.0)
-
-        return scaled_image, new_bbox, new_landmarks
-
-    def _color_augmentation(self, image: tf.Tensor) -> tf.Tensor:
-        """Apply random color augmentation."""
-        # Random brightness
-        if self.brightness_range > 0:
-            image = tf.image.random_brightness(image, self.brightness_range)
-
-        # Random contrast
-        if self.contrast_range > 0:
-            image = tf.image.random_contrast(
-                image,
-                1.0 - self.contrast_range,
-                1.0 + self.contrast_range,
+        # albumentations bbox format: [x_min, y_min, x_max, y_max] normalized
+        try:
+            result = self.transform(
+                image=image,
+                bboxes=[bbox_pixel.tolist()],
+                labels=[0],
+                keypoints=kps_pixel,
             )
 
-        # Random saturation
-        image = tf.image.random_saturation(image, 0.8, 1.2)
+            aug_image = result['image']
 
-        # Random hue
-        image = tf.image.random_hue(image, 0.05)
+            if len(result['bboxes']) > 0:
+                aug_bbox = np.array(result['bboxes'][0], dtype=np.float32)
+            else:
+                aug_bbox = bbox
 
-        # Clip values
-        image = tf.clip_by_value(image, 0.0, 1.0)
+            if len(result['keypoints']) == 5:
+                aug_h, aug_w = aug_image.shape[:2]
+                aug_landmarks = np.array([
+                    [kp[0] / aug_w, kp[1] / aug_h] for kp in result['keypoints']
+                ], dtype=np.float32)
+            else:
+                aug_landmarks = landmarks
 
-        return image
+            # Clamp landmarks to [0, 1]
+            aug_landmarks = np.clip(aug_landmarks, 0.0, 1.0)
+            aug_bbox = np.clip(aug_bbox, 0.0, 1.0)
 
-    def _random_blur(self, image: tf.Tensor) -> tf.Tensor:
-        """Apply random Gaussian blur."""
-        do_blur = tf.random.uniform([]) < self.blur_prob
+            # Resize back to original size if needed
+            if aug_image.shape[0] != h or aug_image.shape[1] != w:
+                aug_image = _resize_with_coords(aug_image, h, w)
 
-        def apply_blur():
-            # Simple box blur as approximation
-            kernel_size = tf.random.uniform([], minval=1, maxval=4, dtype=tf.int32) * 2 + 1
-            kernel = tf.ones([kernel_size, kernel_size, 1, 1]) / tf.cast(
-                kernel_size * kernel_size, tf.float32
-            )
+            return aug_image, aug_bbox, aug_landmarks
 
-            # Apply per channel
-            blurred = []
-            for i in range(3):
-                channel = image[:, :, i:i+1]
-                channel = tf.expand_dims(channel, 0)
-                channel = tf.nn.conv2d(channel, kernel, strides=1, padding='SAME')
-                channel = channel[0]
-                blurred.append(channel)
-
-            return tf.concat(blurred, axis=-1)
-
-        return tf.cond(do_blur, apply_blur, lambda: image)
-
-    def _random_noise(self, image: tf.Tensor) -> tf.Tensor:
-        """Add random Gaussian noise."""
-        do_noise = tf.random.uniform([]) < self.noise_prob
-
-        def add_noise():
-            noise = tf.random.normal(tf.shape(image), mean=0.0, stddev=0.02)
-            return tf.clip_by_value(image + noise, 0.0, 1.0)
-
-        return tf.cond(do_noise, add_noise, lambda: image)
+        except Exception:
+            return image, bbox, landmarks
 
 
-def create_augmentation_from_config(config: Dict) -> FaceAugmentation:
-    """Create augmentation from config dictionary."""
-    aug_config = config.get('augmentation', {})
-    return FaceAugmentation(
-        rotation_range=aug_config.get('rotation_range', 30),
-        scale_range=tuple(aug_config.get('scale_range', [0.8, 1.2])),
-        brightness_range=aug_config.get('brightness_range', 0.2),
-        contrast_range=aug_config.get('contrast_range', 0.2),
-        blur_prob=aug_config.get('blur_prob', 0.3),
-        noise_prob=aug_config.get('noise_prob', 0.2),
-        horizontal_flip=aug_config.get('horizontal_flip', True),
-    )
+def _resize_with_coords(image: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
+    """Resize image. Bbox/landmarks are normalized so no coord adjustment needed."""
+    import cv2
+    return cv2.resize(image, (target_w, target_h))

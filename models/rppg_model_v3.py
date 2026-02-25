@@ -362,9 +362,6 @@ class HRBranch(nn.Module):
         # 空間聚合
         self.spatial_pool = nn.AdaptiveAvgPool3d((frames, 1, 1))
 
-        # 3D→1D 瓶頸點 dropout（空間壓縮後、Mamba 前）
-        self.dropout = nn.Dropout(p=0.1)
-
         # Mamba：全域時序建模（在 1D 時序上）
         self.mamba = MambaBlock(
             channels=channels,
@@ -373,6 +370,9 @@ class HRBranch(nn.Module):
             expand=mamba_expand,
         )
 
+        # Mamba 輸出後的 dropout（Mamba 看到完整時序，僅對輸出特徵正則化）
+        self.dropout = nn.Dropout(p=0.1)
+
         # 輸出投影
         self.output_conv = nn.Conv3d(channels, 1, kernel_size=1)
 
@@ -380,10 +380,10 @@ class HRBranch(nn.Module):
         x = self.temporal_refiner(x)               # [B, 64, T, H/4, W/4]
         x = self.spatial_pool(x)                   # [B, 64, T, 1,   1  ]
 
-        # Mamba 在純時序上建模
+        # Mamba 在純時序上建模（輸入完整，不中斷狀態傳遞）
         x_1d = x.squeeze(-1).squeeze(-1)           # [B, 64, T]
-        x_1d = self.dropout(x_1d)
         x_1d = self.mamba(x_1d)                    # [B, 64, T]
+        x_1d = self.dropout(x_1d)                  # Mamba 之後才 dropout
         x = x_1d.unsqueeze(-1).unsqueeze(-1)       # [B, 64, T, 1, 1]
 
         return self.output_conv(x)                  # [B, 1,  T, 1, 1]

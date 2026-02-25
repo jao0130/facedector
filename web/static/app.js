@@ -26,6 +26,9 @@ const bufferPct   = document.getElementById('buffer-pct');
 const noFace      = document.getElementById('no-face');
 const confValue   = document.getElementById('conf-value');
 const pipelineFps = document.getElementById('pipeline-fps');
+const ppgCanvas   = document.getElementById('ppg-canvas');
+const ppgCtx      = ppgCanvas.getContext('2d');
+const ppgBpmEl    = document.getElementById('ppg-bpm');
 
 // ── State ────────────────────────────────────────────────────────────────────
 let faceLandmarker = null;
@@ -37,6 +40,12 @@ let bufTotal       = 128;
 let fpsCount       = 0;
 let fpsLast        = performance.now();
 let lastProcessed  = 0;
+
+// ── PPG display buffer ────────────────────────────────────────────────────────
+const PPG_BUFFER_LEN = 300;                        // 10 秒 @ 30 Hz
+const ppgBuffer      = new Float32Array(PPG_BUFFER_LEN);
+let   ppgWriteIdx    = 0;
+let   ppgHasData     = false;
 
 // Hidden canvases for ROI extraction
 const captureCanvas = document.createElement('canvas');
@@ -90,6 +99,13 @@ function initWorker() {
       } else if (msg.type === 'result') {
         latestVitals = { hr_bpm: msg.hr_bpm, spo2: msg.spo2 };
         console.log(`[VitalSense] HR=${msg.hr_bpm} BPM, SpO2=${msg.spo2}%`);
+        if (msg.ppg_wave) {
+          for (const v of msg.ppg_wave) {
+            ppgBuffer[ppgWriteIdx % PPG_BUFFER_LEN] = v;
+            ppgWriteIdx++;
+          }
+          ppgHasData = true;
+        }
       } else if (msg.type === 'buffer') {
         bufFilled = msg.filled;
         bufTotal  = msg.total;
@@ -129,6 +145,8 @@ function resizeOverlay() {
   const panel = overlay.parentElement;
   overlay.width  = panel.clientWidth;
   overlay.height = panel.clientHeight;
+  ppgCanvas.width  = ppgCanvas.clientWidth  * devicePixelRatio;
+  ppgCanvas.height = ppgCanvas.clientHeight * devicePixelRatio;
 }
 
 // ── Face Detection ───────────────────────────────────────────────────────────
@@ -194,6 +212,63 @@ function cropFaceROI(bbox) {
 
   roiCtx.drawImage(captureCanvas, rx1, ry1, rw, rh, 0, 0, INPUT_SIZE, INPUT_SIZE);
   return roiCtx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE).data;
+}
+
+// ── PPG Waveform Draw ─────────────────────────────────────────────────────────
+function drawPPG() {
+  const W = ppgCanvas.width, H = ppgCanvas.height;
+
+  // Background
+  ppgCtx.fillStyle = '#050a05';
+  ppgCtx.fillRect(0, 0, W, H);
+
+  // Grid
+  ppgCtx.strokeStyle = 'rgba(0,255,136,0.06)';
+  ppgCtx.lineWidth = 1;
+  for (let s = 0; s <= PPG_BUFFER_LEN; s += 30) {          // 垂直：每秒一格
+    const x = Math.round(s / PPG_BUFFER_LEN * W) + 0.5;
+    ppgCtx.beginPath(); ppgCtx.moveTo(x, 0); ppgCtx.lineTo(x, H); ppgCtx.stroke();
+  }
+  for (let i = 1; i < 4; i++) {                             // 水平：4 等分
+    const y = Math.round(H * i / 4) + 0.5;
+    ppgCtx.beginPath(); ppgCtx.moveTo(0, y); ppgCtx.lineTo(W, y); ppgCtx.stroke();
+  }
+
+  if (!ppgHasData) return;
+
+  // 動態範圍：從緩衝區計算 min/max
+  let bMin = Infinity, bMax = -Infinity;
+  for (let i = 0; i < PPG_BUFFER_LEN; i++) {
+    if (ppgBuffer[i] < bMin) bMin = ppgBuffer[i];
+    if (ppgBuffer[i] > bMax) bMax = ppgBuffer[i];
+  }
+  const margin  = H * 0.12;
+  const sigRange = Math.max(bMax - bMin, 0.01);
+
+  // 波形（從最舊→最新，左→右）
+  const writePos = ppgWriteIdx % PPG_BUFFER_LEN;
+  ppgCtx.strokeStyle = '#00ff88';
+  ppgCtx.lineWidth   = 1.5 * devicePixelRatio;
+  ppgCtx.shadowColor = '#00ff88';
+  ppgCtx.shadowBlur  = 4;
+  ppgCtx.beginPath();
+  for (let i = 0; i < PPG_BUFFER_LEN; i++) {
+    const v   = ppgBuffer[(writePos + i) % PPG_BUFFER_LEN];
+    const x   = (i / PPG_BUFFER_LEN) * W;
+    const y   = H - margin - ((v - bMin) / sigRange) * (H - 2 * margin);
+    i === 0 ? ppgCtx.moveTo(x, y) : ppgCtx.lineTo(x, y);
+  }
+  ppgCtx.stroke();
+  ppgCtx.shadowBlur = 0;
+
+  // 掃描游標：在寫入點前方畫漸層遮罩（仿真實監護儀效果）
+  const cursorX = (writePos / PPG_BUFFER_LEN) * W;
+  const dimW    = Math.max(W * 0.04, 6);
+  const grad    = ppgCtx.createLinearGradient(cursorX, 0, cursorX + dimW, 0);
+  grad.addColorStop(0, 'rgba(5,10,5,0.95)');
+  grad.addColorStop(1, 'rgba(5,10,5,0)');
+  ppgCtx.fillStyle = grad;
+  ppgCtx.fillRect(cursorX, 0, dimW, H);
 }
 
 // ── Canvas Overlay ───────────────────────────────────────────────────────────
@@ -280,7 +355,8 @@ function updateUI(face) {
 
   // Vitals
   const hr = latestVitals.hr_bpm;
-  hrValue.textContent = hr > 0 ? Math.round(hr) : '--';
+  hrValue.textContent  = hr > 0 ? Math.round(hr) : '--';
+  ppgBpmEl.textContent = hr > 0 ? `${Math.round(hr)} BPM` : '-- BPM';
 
   const spo2 = latestVitals.spo2;
   spo2Value.textContent = spo2 > 0 ? spo2.toFixed(1) : '--';
@@ -305,6 +381,7 @@ function mainLoop(timestamp) {
 
   const face = detectFace(timestamp);
   drawOverlay(face);
+  drawPPG();
 
   if (face && workerReady) {
     const rgbaData = cropFaceROI(face.bbox);

@@ -96,9 +96,10 @@ self.onmessage = async (e) => {
       const spo2   = smoothSpo2((isNaN(spo2Raw) || spo2Raw === 0) ? 0 : Math.max(85, Math.min(100, spo2Raw)));
 
       self.postMessage({
-        type:   'result',
-        hr_bpm: Math.round(hr * 10) / 10,
-        spo2:   Math.round(spo2 * 10) / 10,
+        type:     'result',
+        hr_bpm:   Math.round(hr * 10) / 10,
+        spo2:     Math.round(spo2 * 10) / 10,
+        ppg_wave: rppgWave.slice(-PREDICT_EVERY),  // 最新 30 samples（非重疊部分）
       });
     } catch (err) {
       self.postMessage({ type: 'error', message: 'Inference error: ' + err.message });

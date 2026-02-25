@@ -22,7 +22,7 @@ body {
   font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
   height: 100dvh;
   display: grid;
-  grid-template-rows: 48px 1fr;
+  grid-template-rows: 48px 1fr 150px;
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
 }
@@ -264,6 +264,44 @@ main {
 
 .info-key { color: var(--text-dim); }
 .info-val { color: var(--text-primary); }
+
+/* ── PPG Panel ─────────────────────────────────────────────────────────── */
+#ppg-panel {
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  padding: 8px 16px 12px;
+  gap: 6px;
+}
+
+#ppg-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+#ppg-label {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 2px;
+  color: var(--text-dim);
+}
+
+#ppg-bpm {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent-green);
+  letter-spacing: 1px;
+}
+
+#ppg-canvas {
+  flex: 1;
+  width: 100%;
+  border-radius: var(--radius);
+  background: #050a05;
+  display: block;
+}
 
 /* ── Scrollbar ─────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 4px; }

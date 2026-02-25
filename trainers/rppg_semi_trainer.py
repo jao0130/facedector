@@ -10,6 +10,7 @@ Teacher model is an EMA copy of Student (no gradient updates).
 
 import os
 import copy
+import csv
 import math
 from typing import Iterator
 from typing import Dict
@@ -105,6 +106,15 @@ class rPPGSemiTrainer(BaseTrainer):
         history = {
             'train_sup': [], 'train_unsup': [], 'train_total': [], 'val_loss': [],
         }
+
+        # Per-epoch CSV log (flushed every epoch, survives interruptions)
+        from trainers.base_trainer import make_rppg_ckpt_name
+        csv_name = make_rppg_ckpt_name(self.cfg, tag="semi_log").replace(".pth", ".csv")
+        csv_path = os.path.join(self.cfg.OUTPUT.LOG_DIR, csv_name)
+        csv_file = open(csv_path, 'w', newline='')
+        csv_writer = csv.writer(csv_file)
+        csv_writer.writerow(['epoch', 'train_sup', 'train_unsup', 'train_total', 'val_loss', 'lambda', 'best'])
+        csv_file.flush()
 
         for epoch in range(total_epochs):
             self.student.train()
@@ -207,6 +217,7 @@ class rPPGSemiTrainer(BaseTrainer):
             history['train_total'].append(avg_total)
 
             # Validation (supervised metric only)
+            is_best = False
             if valid_loader is not None:
                 val_loss = self._validate(valid_loader)
                 history['val_loss'].append(val_loss)
@@ -216,6 +227,7 @@ class rPPGSemiTrainer(BaseTrainer):
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     patience_counter = 0
+                    is_best = True
                     ckpt_name = make_rppg_ckpt_name(self.cfg, tag="best")
                     path = os.path.join(self.cfg.OUTPUT.CHECKPOINT_DIR, ckpt_name)
                     self.save_checkpoint(self.student, optimizer, epoch, path, val_loss=val_loss)
@@ -223,13 +235,25 @@ class rPPGSemiTrainer(BaseTrainer):
                 else:
                     patience_counter += 1
                     if patience_counter >= patience:
+                        csv_writer.writerow([epoch + 1, f"{avg_sup:.4f}", f"{avg_unsup:.4f}",
+                                             f"{avg_total:.4f}", f"{val_loss:.4f}", f"{lambda_w:.4f}", ''])
+                        csv_file.flush()
                         print(f"  Early stopping at epoch {epoch+1}")
                         break
             else:
+                val_loss = float('nan')
                 print(f"  Epoch {epoch+1} | Sup: {avg_sup:.4f} | Unsup: {avg_unsup:.4f} | "
                       f"Total: {avg_total:.4f} | λ: {lambda_w:.3f}")
 
-        # Save final history
+            # Write CSV row immediately (survives interruptions)
+            csv_writer.writerow([epoch + 1, f"{avg_sup:.4f}", f"{avg_unsup:.4f}",
+                                 f"{avg_total:.4f}", f"{val_loss:.4f}", f"{lambda_w:.4f}",
+                                 '*' if is_best else ''])
+            csv_file.flush()
+
+        csv_file.close()
+
+        # Save final history JSON
         ckpt_name = make_rppg_ckpt_name(self.cfg, tag="semi")
         history_name = ckpt_name.replace(".pth", "_history.json")
         self.save_history(history, os.path.join(self.cfg.OUTPUT.LOG_DIR, history_name))

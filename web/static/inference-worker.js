@@ -19,6 +19,13 @@ let firstPredictionDone = false;
 let session          = null;
 let inferenceRunning = false;
 
+// ── HR / SpO2 stabilizer state ────────────────────────────────────────────────
+const HR_ALPHA       = 0.25;   // EMA 係數（越小越穩）
+const HR_OUTLIER_BPM = 20;     // 超過此偏差視為雜訊，維持舊值
+const SPO2_ALPHA     = 0.2;
+let   hrSmoothed     = 0;
+let   spo2Smoothed   = 0;
+
 // ── Message handler ──────────────────────────────────────────────────────────
 self.onmessage = async (e) => {
   const msg = e.data;
@@ -83,8 +90,10 @@ self.onmessage = async (e) => {
 
       const rppgWave = waveOut.data;
       const spo2Raw  = spo2Out.data[0];
-      const hr       = estimateHR(rppgWave, 30);
-      const spo2     = (isNaN(spo2Raw) || spo2Raw === 0) ? 0 : Math.max(85, Math.min(100, spo2Raw));
+
+      const hrRaw  = estimateHR(rppgWave, 30);
+      const hr     = smoothHR(hrRaw);
+      const spo2   = smoothSpo2((isNaN(spo2Raw) || spo2Raw === 0) ? 0 : Math.max(85, Math.min(100, spo2Raw)));
 
       self.postMessage({
         type:   'result',
@@ -123,12 +132,19 @@ function toRawTensor() {
   return output;
 }
 
-// ── FFT Heart Rate ──────────────────────────────────────────────────────────
+// ── FFT Heart Rate（Hanning 窗 + 拋物線內插）────────────────────────────────
 function estimateHR(signal, fs) {
   const N = signal.length;
   const K = Math.floor(N / 2) + 1;
-  let maxMag = 0, peakFreq = 0;
 
+  // 預計算 Hanning 窗
+  const win = new Float32Array(N);
+  for (let n = 0; n < N; n++) {
+    win[n] = 0.5 * (1 - Math.cos(2 * Math.PI * n / (N - 1)));
+  }
+
+  // 計算心率範圍內各 bin 的功率
+  const mags = new Float32Array(K);
   for (let k = 0; k < K; k++) {
     const freq = k * fs / N;
     if (freq < 0.75 || freq > 2.5) continue;
@@ -136,13 +152,46 @@ function estimateHR(signal, fs) {
     let re = 0, im = 0;
     for (let n = 0; n < N; n++) {
       const angle = -2 * Math.PI * k * n / N;
-      re += signal[n] * Math.cos(angle);
-      im += signal[n] * Math.sin(angle);
+      const ws    = signal[n] * win[n];
+      re += ws * Math.cos(angle);
+      im += ws * Math.sin(angle);
     }
+    mags[k] = re * re + im * im;
+  }
 
-    const mag = re * re + im * im;
-    if (mag > maxMag) { maxMag = mag; peakFreq = freq; }
+  // 找最大功率 bin
+  let maxMag = 0, peakK = 0;
+  for (let k = 0; k < K; k++) {
+    if (mags[k] > maxMag) { maxMag = mags[k]; peakK = k; }
+  }
+
+  // 拋物線內插：取得 sub-bin 精度（減少 14 BPM 量化跳動）
+  let peakFreq = peakK * fs / N;
+  if (peakK > 0 && peakK < K - 1) {
+    const alpha = mags[peakK - 1], beta = mags[peakK], gamma = mags[peakK + 1];
+    const denom = alpha - 2 * beta + gamma;
+    if (Math.abs(denom) > 1e-10) {
+      const offset = 0.5 * (alpha - gamma) / denom;
+      peakFreq = (peakK + offset) * fs / N;
+    }
   }
 
   return peakFreq * 60;
+}
+
+// ── EMA 平滑：HR ──────────────────────────────────────────────────────────────
+function smoothHR(rawHR) {
+  if (hrSmoothed === 0) { hrSmoothed = rawHR; return rawHR; }
+  // 超出合理偏差則拒絕（防止 50→127 突跳）
+  if (Math.abs(rawHR - hrSmoothed) > HR_OUTLIER_BPM) return hrSmoothed;
+  hrSmoothed = HR_ALPHA * rawHR + (1 - HR_ALPHA) * hrSmoothed;
+  return hrSmoothed;
+}
+
+// ── EMA 平滑：SpO2 ────────────────────────────────────────────────────────────
+function smoothSpo2(raw) {
+  if (raw === 0) return spo2Smoothed;
+  if (spo2Smoothed === 0) { spo2Smoothed = raw; return raw; }
+  spo2Smoothed = SPO2_ALPHA * raw + (1 - SPO2_ALPHA) * spo2Smoothed;
+  return spo2Smoothed;
 }

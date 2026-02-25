@@ -1,24 +1,36 @@
-TASK:              "rppg_finetune"
-DEVICE:            "cuda:0"
-NUM_WORKERS:       0
-SEED:              42
+TASK:                "rppg_finetune"
+DEVICE:              "cuda:0"
+NUM_WORKERS:         0
+SEED:                42
 GPU_MEMORY_LIMIT_MB: 13000
 
 RPPG_MODEL:
-  NAME:                    "FCAtt_v3"
-  FRAMES:                  128
-  FPS:                     30
-  INPUT_SIZE:              72
-  FREQ_ATT_POOL_SIZE:      8
-  FREQ_ATT_TEMPORAL_KERNEL: 5
-  FREQ_ATT_SHARPNESS:      15.0
-  NUM_FREQ_BLOCKS:         3
-  FREQ_LOW:                0.7
-  FREQ_HIGH:               2.5
-  SPO2_MIN:                85.0
-  SPO2_RANGE:              15.0
-  # 必須指定預訓練權重（Stage-1 結果）
-  WEIGHTS: "checkpoints/rppg_semi_V3/rppg_fcatt_v3_128f_72px_best.pth"
+  # ── 選擇模型 ───────────────────────────────────────────────────────────────
+  # "FCAtt_v2" 或 "FCAtt_v3"
+  NAME: "FCAtt_v2"
+
+  # ── V2 / V3 共用參數 ────────────────────────────────────────────────────────
+  FRAMES:    128
+  FPS:       30
+  FREQ_LOW:  0.7
+  FREQ_HIGH: 2.5
+  SPO2_MIN:   85.0
+  SPO2_RANGE: 15.0
+
+  # ── FrequencyAttention 共用（V2 / V3 皆讀取）─────────────────────────────
+  FREQ_ATT_POOL_SIZE:       8     # V2: freq_att_pool_size  / V3: pool_size
+  FREQ_ATT_TEMPORAL_KERNEL: 7     # V2: 預設 7              / V3: 預設 3（架構差異）
+  FREQ_ATT_SHARPNESS:       10.0  # V2: freq_att_sharpness  / V3: sharpness
+
+  # ── V3 專用 ────────────────────────────────────────────────────────────────
+  # (NAME="FCAtt_v2" 時以下兩個參數會被忽略)
+  NUM_FREQ_BLOCKS: 3    # V3: FrequencyAttentionBlock 堆疊數
+  INPUT_SIZE:      72   # V3: poolspa 固定尺寸計算用
+
+  # ── 預訓練權重（Stage-1 checkpoint，必填）──────────────────────────────────
+  # FCAtt_v2 checkpoint:  checkpoints/rppg_semi/rppg_fcatt_v2_128f_72px_best.pth
+  # FCAtt_v3 checkpoint:  checkpoints/rppg_semi_V3/rppg_fcatt_v3_128f_72px_best.pth
+  WEIGHTS: "checkpoints/rppg_semi/rppg_fcatt_v2_128f_72px_best.pth"
 
 RPPG_DATA:
   DATASET:      "PURE+MCD-rPPG"
@@ -36,30 +48,30 @@ RPPG_DATA:
   RESIZE_W:     72
   RESIZE_H:     72
   DO_PREPROCESS: false
-  TEST_DATASET:       "UBFC"
-  TEST_DATA_PATH:     "D:/UBFC/DATASET_2"
-  TEST_CACHED_PATH:   ""
+  TEST_DATASET:      "UBFC"
+  TEST_DATA_PATH:    "D:/UBFC/DATASET_2"
+  TEST_CACHED_PATH:  ""
   TEST_CACHED_PATHS:
     - "D:/PreprocessedData_UBFC"
-  TRAIN_BEGIN:  0.0
-  TRAIN_END:    0.8
-  VALID_BEGIN:  0.8
-  VALID_END:    1.0
-  TEST_BEGIN:   0.0
-  TEST_END:     1.0
+  TRAIN_BEGIN: 0.0
+  TRAIN_END:   0.8
+  VALID_BEGIN: 0.8
+  VALID_END:   1.0
+  TEST_BEGIN:  0.0
+  TEST_END:    1.0
 
 RPPG_TRAIN:
-  BATCH_SIZE:   8
-  GRAD_CLIP:    1.0
+  BATCH_SIZE: 8
+  GRAD_CLIP:  1.0
 
 RPPG_FINETUNE:
   EPOCHS:         30
   PATIENCE:       15
-  LR_G:           5.0e-5   # Generator (HRBranch) — 小 LR 避免破壞頻率特徵
-  LR_D:           2.0e-4   # Discriminator — 略快，確保判別能力
+  LR_G:           5.0e-5   # Generator (HRBranch)：小 LR 保留頻率特徵
+  LR_D:           2.0e-4   # Discriminator：略快確保判別能力
   LAMBDA_MSE:     10.0     # Z-score MSE 權重（與 NegPearson×100 量級匹配）
   LAMBDA_ADV:     0.1      # Adversarial 權重（保守，避免 GAN 不穩定）
-  WARMUP_EPOCHS:  5        # 前 5 epoch 只用 supervised loss，讓 G 先有基礎品質
+  WARMUP_EPOCHS:  5        # 前 N epoch 只用 supervised loss
 
 OUTPUT:
   CHECKPOINT_DIR: "checkpoints/rppg_finetune"

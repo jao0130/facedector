@@ -356,6 +356,9 @@ class HRBranch(nn.Module):
         # 空間聚合
         self.spatial_pool = nn.AdaptiveAvgPool3d((frames, 1, 1))
 
+        # 3D→1D 瓶頸點 dropout（空間壓縮後、Mamba 前）
+        self.dropout = nn.Dropout(p=0.1)
+
         # Mamba：全域時序建模（在 1D 時序上）
         self.mamba = MambaBlock(
             channels=channels,
@@ -373,6 +376,7 @@ class HRBranch(nn.Module):
 
         # Mamba 在純時序上建模
         x_1d = x.squeeze(-1).squeeze(-1)           # [B, 64, T]
+        x_1d = self.dropout(x_1d)
         x_1d = self.mamba(x_1d)                    # [B, 64, T]
         x = x_1d.unsqueeze(-1).unsqueeze(-1)       # [B, 64, T, 1, 1]
 
@@ -465,10 +469,12 @@ class FCAtt_v3(nn.Module):
             nn.Conv1d(19, 32, kernel_size=3, padding=1),
             nn.BatchNorm1d(32),
             nn.ELU(),
+            nn.Dropout(p=0.2),
             ChannelAttention1D(in_channels=32, reduction=8),
             nn.Conv1d(32, 32, kernel_size=3, padding=1),
             nn.BatchNorm1d(32),
             nn.ELU(),
+            nn.Dropout(p=0.2),
             nn.AdaptiveAvgPool1d(1),
             nn.Flatten(),
             nn.Linear(32, 1),

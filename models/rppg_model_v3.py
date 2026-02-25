@@ -349,13 +349,14 @@ class HRBranch(nn.Module):
         self.frames = frames
 
         # 局部時序精煉（spatial kernel=1）
+        # ELU：保留負值（對應 BVP 波形下降相），比 SiLU 在 x=-1 多傳遞 2.3× 負值資訊
         self.temporal_refiner = nn.Sequential(
             nn.Conv3d(channels, channels, kernel_size=(3, 1, 1), padding=(1, 0, 0)),
             nn.GroupNorm(8, channels),
-            nn.SiLU(inplace=True),
+            nn.ELU(inplace=True),
             nn.Conv3d(channels, channels, kernel_size=(5, 1, 1), padding=(2, 0, 0)),
             nn.GroupNorm(8, channels),
-            nn.SiLU(inplace=True),
+            nn.ELU(inplace=True),
         )
 
         # 空間聚合

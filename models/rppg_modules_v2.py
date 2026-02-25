@@ -75,6 +75,7 @@ class FrequencyAttention(nn.Module):
             torch.tensor((freq_high - freq_low) / 2.0))
 
         # Temporal score refiner
+        # ELU：時序注意力分數需要正確表示負值（非心跳區間的抑制）
         self.score_refiner = nn.Sequential(
             nn.Conv3d(
                 num_input_channels, M_intermediate_channels,
@@ -83,11 +84,12 @@ class FrequencyAttention(nn.Module):
                 bias=False,
             ),
             nn.GroupNorm(4, M_intermediate_channels),
-            nn.SiLU(inplace=True),
+            nn.ELU(inplace=True),
             nn.Conv3d(M_intermediate_channels, 1, kernel_size=(1, 1, 1), bias=True),
         )
 
         # Spatial score refiner — NO Sigmoid (applied in forward)
+        # SiLU：空間注意力分數對負值保留需求較低
         self.spatial_score_refiner = nn.Sequential(
             nn.Conv2d(num_input_channels, 8, kernel_size=5, padding=2),
             nn.GroupNorm(4, 8),

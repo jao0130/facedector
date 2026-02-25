@@ -82,16 +82,16 @@ class FrequencyAttention(nn.Module):
                 padding=((temporal_kernel_size - 1) // 2, 0, 0),
                 bias=False,
             ),
-            nn.BatchNorm3d(M_intermediate_channels),
-            nn.ELU(inplace=True),
+            nn.GroupNorm(4, M_intermediate_channels),
+            nn.SiLU(inplace=True),
             nn.Conv3d(M_intermediate_channels, 1, kernel_size=(1, 1, 1), bias=True),
         )
 
         # Spatial score refiner — NO Sigmoid (applied in forward)
         self.spatial_score_refiner = nn.Sequential(
             nn.Conv2d(num_input_channels, 8, kernel_size=5, padding=2),
-            nn.BatchNorm2d(8),
-            nn.ELU(inplace=True),
+            nn.GroupNorm(4, 8),
+            nn.SiLU(inplace=True),
             nn.Conv2d(8, 1, kernel_size=1),
         )
 

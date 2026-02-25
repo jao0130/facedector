@@ -261,23 +261,23 @@ class SpatialStemEncoder(nn.Module):
         self.tsm0 = TemporalShift(fold_div=fold_div)
         self.conv1 = nn.Sequential(
             nn.Conv3d(3, 16, kernel_size=(1, 3, 3), padding=(0, 1, 1)),
-            nn.BatchNorm3d(16),
-            nn.ELU(inplace=True),
+            nn.GroupNorm(4, 16),
+            nn.SiLU(inplace=True),
         )
         self.pool1 = nn.MaxPool3d(kernel_size=(1, 2, 2), stride=(1, 2, 2))
 
         self.tsm1 = TemporalShift(fold_div=fold_div)
         self.conv2 = nn.Sequential(
             nn.Conv3d(16, 32, kernel_size=(1, 3, 3), padding=(0, 1, 1)),
-            nn.BatchNorm3d(32),
-            nn.ELU(inplace=True),
+            nn.GroupNorm(8, 32),
+            nn.SiLU(inplace=True),
         )
 
         self.tsm2 = TemporalShift(fold_div=fold_div)
         self.conv3 = nn.Sequential(
             nn.Conv3d(32, 64, kernel_size=(1, 3, 3), padding=(0, 1, 1)),
-            nn.BatchNorm3d(64),
-            nn.ELU(inplace=True),
+            nn.GroupNorm(8, 64),
+            nn.SiLU(inplace=True),
         )
         self.pool2 = nn.MaxPool3d(kernel_size=(1, 2, 2), stride=(1, 2, 2))
 
@@ -301,8 +301,9 @@ class FrequencyAttentionBlock(nn.Module):
     def __init__(self, channels: int = 64, frames: int = 128, fps: int = 30,
                  pool_size: int = 8, temporal_kernel_size: int = 3,
                  M: int = 16, freq_low: float = 0.7, freq_high: float = 2.5,
-                 sharpness: float = 10.0):
+                 sharpness: float = 10.0, drop_rate: float = 0.0):
         super().__init__()
+        self.drop_rate = drop_rate
         self.freq_att = FrequencyAttention(
             num_input_channels=channels,
             frames=frames, fps=fps,
@@ -314,12 +315,16 @@ class FrequencyAttentionBlock(nn.Module):
         )
         self.pointwise = nn.Sequential(
             nn.Conv3d(channels, channels, kernel_size=1, bias=False),
-            nn.BatchNorm3d(channels),
-            nn.ELU(inplace=True),
+            nn.GroupNorm(8, channels),
+            nn.SiLU(inplace=True),
         )
         self.channel_attn = ChannelAttention3D(channels, reduction=8)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Stochastic Depth：訓練時按 drop_rate 機率直接回傳 identity
+        if self.training and self.drop_rate > 0.0:
+            if torch.rand(1, device=x.device).item() < self.drop_rate:
+                return x
         out = self.freq_att(x)          # 頻域加權
         out = self.pointwise(out)       # 通道混合
         out = self.channel_attn(out)    # 通道選擇
@@ -346,11 +351,11 @@ class HRBranch(nn.Module):
         # 局部時序精煉（spatial kernel=1）
         self.temporal_refiner = nn.Sequential(
             nn.Conv3d(channels, channels, kernel_size=(3, 1, 1), padding=(1, 0, 0)),
-            nn.BatchNorm3d(channels),
-            nn.ELU(inplace=True),
+            nn.GroupNorm(8, channels),
+            nn.SiLU(inplace=True),
             nn.Conv3d(channels, channels, kernel_size=(5, 1, 1), padding=(2, 0, 0)),
-            nn.BatchNorm3d(channels),
-            nn.ELU(inplace=True),
+            nn.GroupNorm(8, channels),
+            nn.SiLU(inplace=True),
         )
 
         # 空間聚合
@@ -392,13 +397,13 @@ class SpO2Branch(nn.Module):
         super().__init__()
         self.conv1 = nn.Sequential(
             nn.Conv3d(64, 32, kernel_size=(1, 3, 3), padding=(0, 1, 1)),
-            nn.BatchNorm3d(32),
-            nn.ELU(inplace=True),
+            nn.GroupNorm(8, 32),
+            nn.SiLU(inplace=True),
         )
         self.conv2 = nn.Sequential(
             nn.Conv3d(32, 16, kernel_size=(3, 1, 1), padding=(1, 0, 0)),
-            nn.BatchNorm3d(16),
-            nn.ELU(inplace=True),
+            nn.GroupNorm(4, 16),
+            nn.SiLU(inplace=True),
         )
         self.pool = nn.AdaptiveAvgPool3d((frames, 1, 1))
 
@@ -446,7 +451,9 @@ class FCAtt_v3(nn.Module):
         # ── 1. 空間升維（含 TSM） ──
         self.stem = SpatialStemEncoder(fold_div=8)
 
-        # ── 2. 頻域注意力主幹（含 ChannelAttention3D） ──
+        # ── 2. 頻域注意力主幹（含 ChannelAttention3D + Stochastic Depth） ──
+        # drop_rate 隨深度線性遞增（淺層保持穩定特徵，深層容忍更多跳過）
+        max_drop = 0.15
         self.freq_blocks = nn.ModuleList([
             FrequencyAttentionBlock(
                 channels=64, frames=frames, fps=fps,
@@ -454,8 +461,9 @@ class FCAtt_v3(nn.Module):
                 temporal_kernel_size=temporal_kernel_size,
                 M=M, freq_low=freq_low, freq_high=freq_high,
                 sharpness=sharpness,
+                drop_rate=max_drop * (i + 1) / num_freq_blocks,
             )
-            for _ in range(num_freq_blocks)
+            for i in range(num_freq_blocks)
         ])
 
         # ── 3. HR 分支（含 MambaBlock） ──
@@ -467,13 +475,13 @@ class FCAtt_v3(nn.Module):
         # ── 5. SpO2 融合頭：1(rPPG) + 1(VPG) + 1(APG) + 16(SpO2) = 19 ──
         self.spo2_fusion_head = nn.Sequential(
             nn.Conv1d(19, 32, kernel_size=3, padding=1),
-            nn.BatchNorm1d(32),
-            nn.ELU(),
+            nn.GroupNorm(8, 32),
+            nn.SiLU(),
             nn.Dropout(p=0.2),
             ChannelAttention1D(in_channels=32, reduction=8),
             nn.Conv1d(32, 32, kernel_size=3, padding=1),
-            nn.BatchNorm1d(32),
-            nn.ELU(),
+            nn.GroupNorm(8, 32),
+            nn.SiLU(),
             nn.Dropout(p=0.2),
             nn.AdaptiveAvgPool1d(1),
             nn.Flatten(),

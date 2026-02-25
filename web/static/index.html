@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VitalSense</title>
+  <link rel="stylesheet" href="style.css">
+
+  <!-- ONNX Runtime loaded in inference-worker.js (off main thread) -->
+</head>
+<body>
+
+  <header>
+    <span id="brand">VITALSENSE</span>
+    <div id="status-group">
+      <span id="conn-dot" class="dot disconnected"></span>
+      <span id="conn-label">Loading</span>
+      <span id="fps-display">-- FPS</span>
+    </div>
+  </header>
+
+  <main>
+    <section id="video-panel">
+      <video id="webcam" autoplay playsinline muted></video>
+      <canvas id="overlay"></canvas>
+      <div id="no-face" class="hidden">NO FACE DETECTED</div>
+    </section>
+
+    <aside id="vitals-panel">
+
+      <div class="vital-card" id="card-hr">
+        <div class="vital-icon">&#9829;</div>
+        <div class="vital-label">HEART RATE</div>
+        <div class="vital-value" id="hr-value">--</div>
+        <div class="vital-unit">BPM</div>
+      </div>
+
+      <div class="vital-card" id="card-spo2">
+        <div class="vital-icon">&#9672;</div>
+        <div class="vital-label">SpO&#8322;</div>
+        <div class="vital-value" id="spo2-value">--</div>
+        <div class="vital-unit">%</div>
+      </div>
+
+      <div id="buffer-section">
+        <div id="buffer-header">
+          <span id="buffer-label">SIGNAL BUFFER</span>
+          <span id="buffer-pct">0%</span>
+        </div>
+        <div id="buffer-track">
+          <div id="buffer-bar"></div>
+        </div>
+      </div>
+
+      <div id="info-section">
+        <div class="info-row">
+          <span class="info-key">Detection</span>
+          <span class="info-val" id="conf-value">--</span>
+        </div>
+        <div class="info-row">
+          <span class="info-key">Pipeline FPS</span>
+          <span class="info-val" id="pipeline-fps">--</span>
+        </div>
+      </div>
+
+    </aside>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

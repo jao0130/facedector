@@ -1,0 +1,271 @@
+/* ── Reset & Variables ──────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:           #0a0a0a;
+  --surface:      #111111;
+  --surface-alt:  #0d0d0d;
+  --border:       #1a1a1a;
+  --accent-green: #00ff88;
+  --accent-cyan:  #00ccff;
+  --accent-red:   #ff3355;
+  --accent-amber: #ffaa00;
+  --text-primary: #e0e0e0;
+  --text-dim:     #555555;
+  --text-muted:   #333333;
+  --radius:       4px;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  height: 100dvh;
+  display: grid;
+  grid-template-rows: 48px 1fr;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Header ────────────────────────────────────────────────────────────── */
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+#brand {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 6px;
+  color: var(--accent-green);
+}
+
+#status-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  transition: background 0.3s, box-shadow 0.3s;
+}
+
+.dot.connected {
+  background: var(--accent-green);
+  box-shadow: 0 0 8px var(--accent-green);
+}
+
+.dot.disconnected {
+  background: var(--accent-red);
+  box-shadow: 0 0 6px rgba(255, 51, 85, 0.4);
+}
+
+.dot.loading {
+  background: var(--accent-amber);
+  box-shadow: 0 0 6px rgba(255, 170, 0, 0.4);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+#fps-display {
+  color: var(--text-muted);
+  font-size: 10px;
+  min-width: 60px;
+  text-align: right;
+}
+
+/* ── Main Layout ───────────────────────────────────────────────────────── */
+main {
+  display: grid;
+  grid-template-columns: 1fr 260px;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* ── Video Panel ───────────────────────────────────────────────────────── */
+#video-panel {
+  position: relative;
+  background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+#webcam {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  transform: scaleX(-1);
+}
+
+#overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  transform: scaleX(-1);
+}
+
+#no-face {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(255, 51, 85, 0.1);
+  border: 1px solid rgba(255, 51, 85, 0.4);
+  color: var(--accent-red);
+  padding: 8px 20px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 3px;
+  border-radius: var(--radius);
+  backdrop-filter: blur(4px);
+}
+
+.hidden { display: none !important; }
+
+/* ── Vitals Panel ──────────────────────────────────────────────────────── */
+#vitals-panel {
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  padding: 20px 16px;
+  gap: 16px;
+  overflow-y: auto;
+}
+
+/* ── Vital Card ────────────────────────────────────────────────────────── */
+.vital-card {
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px 16px 16px;
+  text-align: center;
+  position: relative;
+  transition: border-color 0.5s;
+}
+
+.vital-icon {
+  font-size: 14px;
+  margin-bottom: 4px;
+  opacity: 0.4;
+}
+
+#card-hr .vital-icon { color: var(--accent-green); }
+#card-spo2 .vital-icon { color: var(--accent-cyan); }
+
+.vital-label {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 3px;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+}
+
+.vital-value {
+  font-size: 56px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -3px;
+  transition: color 0.5s;
+}
+
+#card-hr .vital-value { color: var(--accent-green); }
+#card-spo2 .vital-value { color: var(--accent-cyan); }
+
+.vital-unit {
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 2px;
+  color: var(--text-dim);
+  margin-top: 8px;
+}
+
+/* SpO2 alert state */
+#card-spo2.alert {
+  border-color: var(--accent-red);
+}
+#card-spo2.alert .vital-value {
+  color: var(--accent-red);
+}
+
+/* ── Buffer Section ────────────────────────────────────────────────────── */
+#buffer-section {
+  padding: 0 4px;
+}
+
+#buffer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+#buffer-label {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 2px;
+  color: var(--text-dim);
+}
+
+#buffer-pct {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+#buffer-track {
+  height: 3px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+#buffer-bar {
+  height: 100%;
+  width: 0%;
+  background: var(--accent-green);
+  border-radius: 2px;
+  transition: width 0.3s ease, background 0.5s;
+}
+
+/* ── Info Section ──────────────────────────────────────────────────────── */
+#info-section {
+  margin-top: auto;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.info-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+}
+
+.info-key { color: var(--text-dim); }
+.info-val { color: var(--text-primary); }
+
+/* ── Scrollbar ─────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }

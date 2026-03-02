@@ -117,40 +117,14 @@ def main():
         _run_all_tests(trainer, data_loaders)
 
     elif cfg.TASK == "rppg_spo2_finetune":
-        from data.dataset_rppg import (
-            create_rppg_dataloaders, rPPGVideoDataset, _discover_npy_files,
-        )
-        from torch.utils.data import DataLoader
+        from data.dataset_rppg import create_rppg_dataloaders
         from trainers.rppg_spo2_finetune_trainer import rPPGSpO2FinetuneTrainer
 
-        # Labeled DataLoader（MCD-rPPG: BVP + SpO2）
+        # MCD-rPPG (BVP + SpO2) → train/valid
+        # PURE (BVP + SpO2)     → test
         data_loaders = create_rppg_dataloaders(cfg)
-
-        # Unlabeled DataLoader（UBFC-Phys: BVP only, spo2=0）
-        ft = cfg.RPPG_SPO2_FINETUNE
-        unlabeled_path = getattr(ft, 'UNLABELED_PATH', '')
-        if unlabeled_path:
-            import os as _os
-            if _os.path.isdir(unlabeled_path):
-                unlabeled_files = _discover_npy_files(unlabeled_path)
-                if unlabeled_files:
-                    ul_ds = rPPGVideoDataset(unlabeled_files, cfg)
-                    data_loaders['unlabeled'] = DataLoader(
-                        ul_ds,
-                        batch_size=getattr(ft, 'UNLABELED_BATCH_SIZE', 8),
-                        shuffle=True,
-                        num_workers=cfg.NUM_WORKERS,
-                        pin_memory=True,
-                        drop_last=True,
-                    )
-                    print(f"[SpO2Finetune] Unlabeled: {len(unlabeled_files)} chunks "
-                          f"from {unlabeled_path}")
-                else:
-                    print(f"[SpO2Finetune] WARNING: No NPY files found in {unlabeled_path}")
-            else:
-                print(f"[SpO2Finetune] WARNING: UNLABELED_PATH not found: {unlabeled_path}")
-
         trainer = rPPGSpO2FinetuneTrainer(cfg)
+
         history = trainer.train(data_loaders)
         print(f"\n[Done] SpO2 fine-tune complete.")
         _run_all_tests(trainer, data_loaders)

@@ -57,18 +57,13 @@ RPPG_TRAIN:
   GRAD_CLIP:  1.0
 
 RPPG_SPO2_FINETUNE:
-  EPOCHS:          60
-  PATIENCE:        15
-  LR:              2.0e-5   # 保守學習率
-  LAMBDA_SPECTRAL: 3.0      # 頻域 rPPG 約束
-  LAMBDA_SPO2:     10.0     # 有標籤樣本的 SpO2 loss 權重
-  LAMBDA_UNSUP:    1.0      # 無 SpO2 標籤樣本的 rPPG 無監督 loss 權重
+  EPOCHS:    60
+  PATIENCE:  15
+  LR:        2.0e-5   # 保守學習率：只微調 spo2_branch + spo2_fusion_head
 
-  # 半監督：只有 BVP 的無 SpO2 標籤資料
-  # UBFC-rPPG 已有前處理結果（無 spo2.npy → 自動視為 0.0）
-  # 注意：使用後 UBFC 不再是獨立 rPPG 測試集，SpO2 測試改用 PURE
-  UNLABELED_PATH:       "D:/PreprocessedData_UBFC"
-  UNLABELED_BATCH_SIZE: 8
+  # hr_branch 已凍結，L_spo2 梯度不流入 PPG 路徑
+  # 只用 SpO2 MSE+MAE，不需要 LAMBDA_SPECTRAL / LAMBDA_UNSUP
+  LAMBDA_SPO2: 1.0     # 訓練直接用 loss_spo2，此係數保留供 val_loss 調整
 
 OUTPUT:
   CHECKPOINT_DIR: "checkpoints/rppg_spo2_finetune"

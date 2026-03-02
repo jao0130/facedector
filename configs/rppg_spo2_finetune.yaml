@@ -22,12 +22,12 @@ RPPG_MODEL:
   WEIGHTS: "checkpoints/rppg_finetune_v3/rppg_fcatt_v3_128f_72px_finetune_best.pth"
 
 RPPG_DATA:
-  DATASET:      "MCD-rPPG+UBFC-Phys"
+  # 有標籤訓練集：BVP + SpO2 完整標籤
+  DATASET:      "MCD-rPPG"
   DATA_PATH:    ""
   CACHED_PATH:  ""
   CACHED_PATHS:
-    - "D:/PreprocessedData_MCD"        # MCD-rPPG: BVP + SpO2
-    - "D:/PreprocessedData_UBFCPhys"   # UBFC-Phys: BVP only (spo2=0)
+    - "D:/PreprocessedData_MCD"      # MCD-rPPG: BVP + SpO2 (supervised)
   FS:           30
   CHUNK_LENGTH: 128
   LABEL_TYPE:   "DiffNormalized"
@@ -38,11 +38,12 @@ RPPG_DATA:
   RESIZE_H:     72
   DO_PREPROCESS: false
 
+  # 測試集：PURE，有 BVP + SpO2，評估兩者
   TEST_DATASET:      "PURE"
   TEST_DATA_PATH:    ""
   TEST_CACHED_PATH:  ""
   TEST_CACHED_PATHS:
-    - "D:/PreprocessedData"            # PURE: BVP + SpO2
+    - "D:/PreprocessedData"          # PURE: BVP + SpO2
 
   TRAIN_BEGIN: 0.0
   TRAIN_END:   0.8
@@ -58,9 +59,14 @@ RPPG_TRAIN:
 RPPG_SPO2_FINETUNE:
   EPOCHS:          60
   PATIENCE:        15
-  LR:              2.0e-5   # 保守學習率：SpO2 head 比 HR branch 更脆弱
-  LAMBDA_SPECTRAL: 3.0      # 保持 rPPG 頻域能量，防止 HR 品質下滑
-  LAMBDA_SPO2:     10.0     # SpO2 MSE+MAE 相對 rPPG Pearson 的權重
+  LR:              2.0e-5   # 保守學習率
+  LAMBDA_SPECTRAL: 3.0      # 頻域 rPPG 約束
+  LAMBDA_SPO2:     10.0     # 有標籤樣本的 SpO2 loss 權重
+  LAMBDA_UNSUP:    1.0      # 無 SpO2 標籤樣本的 rPPG 無監督 loss 權重
+
+  # 半監督：只有 BVP 的無 SpO2 標籤資料
+  UNLABELED_PATH:       "D:/PreprocessedData_UBFCPhys"
+  UNLABELED_BATCH_SIZE: 8
 
 OUTPUT:
   CHECKPOINT_DIR: "checkpoints/rppg_spo2_finetune"

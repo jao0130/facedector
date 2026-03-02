@@ -1,42 +1,39 @@
 """
 rPPG SpO2 Fine-tune Trainer (Stage-3 Training)
 
-策略：多任務學習，同時改善 SpO2 估計並維持 rPPG 品質。
+資料架構：
+  ┌─ 有標籤 (labeled)  ─┐  MCD-rPPG：BVP + SpO2
+  │  supervised loss      │  → L_rppg + λ_spo2 × L_spo2
+  └────────────────────────┘
 
-訓練資料：
-  MCD-rPPG  — 有 BVP + SpO2 標籤（spo2 > 50）
-  UBFC-Phys — 只有 BVP（spo2 = 0.0，SpO2 loss 跳過）
+  ┌─ 無 SpO2 標籤 (unlabeled) ─┐  UBFC-Phys：只有 BVP
+  │  semi-supervised loss        │  → λ_unsup × L_rppg  (無 SpO2 loss)
+  └──────────────────────────────┘
 
-測試資料：
-  PURE — 有 BVP + SpO2（o2saturation from JSON）
+  測試集：PURE（BVP + SpO2）→ 評估 HR + SpO2 兩者
 
 凍結策略：
-  凍結：stem, freq_blocks（保留空間特徵萃取，防止特徵破壞）
+  凍結：stem, freq_blocks（保留頻率特徵萃取）
   微調：hr_branch, spo2_branch, spo2_fusion_head
 
-Loss（每個 batch）：
-  L_total = L_rppg + λ_spo2 × L_spo2
+每個 step 處理：
+  1. 取一個 labeled batch（MCD-rPPG）→ L_labeled = L_rppg + λ_spo2×L_spo2
+  2. 取一個 unlabeled batch（UBFC-Phys）→ L_unsup = λ_unsup×L_rppg
+  3. L_total = L_labeled + L_unsup，一次 backward
 
-  L_rppg  = NegPearson + λ_spec × SpectralMSE   (全部樣本)
-  L_spo2  = MSE(pred, gt) + 0.5 × MAE(pred, gt) (spo2 > 50 的樣本)
-
-SpO2 遮罩：
-  spo2_label == 0.0 → 無標籤 → 不計算 SpO2 loss
-  spo2_label > 50   → 有效標籤（生理上 SpO2 不可能 < 50%）
-
-Test metrics：
-  HR  : MAE, RMSE
-  SpO2: MAE, RMSE, Pearson r（僅 spo2 > 50 樣本）
-  Wave: Pearson r
+其中 L_rppg = NegPearson×100 + λ_spec×SpectralMSE
+     L_spo2  = MSE(pred, gt) + 0.5×MAE(pred, gt)
 """
 
 import csv
+import itertools
 import os
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from .base_trainer import BaseTrainer, make_rppg_ckpt_name
@@ -52,7 +49,6 @@ def _zscore(x: torch.Tensor) -> torch.Tensor:
 def _spectral_mse(pred: torch.Tensor, target: torch.Tensor,
                   fs: float = 30.0,
                   freq_low: float = 0.7, freq_high: float = 2.5) -> torch.Tensor:
-    N = pred.shape[-1]
     pred_mag   = torch.abs(torch.fft.rfft(pred,   dim=-1))
     target_mag = torch.abs(torch.fft.rfft(target, dim=-1))
     freqs = torch.linspace(0, fs / 2, pred_mag.shape[-1], device=pred.device)
@@ -60,12 +56,22 @@ def _spectral_mse(pred: torch.Tensor, target: torch.Tensor,
     return F.mse_loss(pred_mag[:, mask], target_mag[:, mask])
 
 
+def _rppg_loss(pred_wave, bvp_label, neg_pearson, fs, freq_low, freq_high, lambda_spectral):
+    """共用 rPPG loss：NegPearson + λ_spec × SpectralMSE。"""
+    pred_norm  = _zscore(pred_wave)
+    label_norm = _zscore(bvp_label)
+    loss_pear  = neg_pearson(pred_norm, label_norm) * 100
+    loss_spec  = _spectral_mse(pred_wave, bvp_label, fs=fs,
+                               freq_low=freq_low, freq_high=freq_high)
+    return loss_pear + lambda_spectral * loss_spec, loss_pear, loss_spec
+
+
 # ── SpO2 Fine-tune Trainer ────────────────────────────────────────────────────
 
 class rPPGSpO2FinetuneTrainer(BaseTrainer):
     """
-    Stage-3：從 Stage-2 waveform fine-tune checkpoint 出發，
-    針對 SpO2 branch 進行多任務微調。
+    Stage-3：MCD-rPPG（有標籤）+ UBFC-Phys（BVP-only 半監督）聯合訓練。
+    測試集：PURE（BVP + SpO2 均有標籤）。
     """
 
     def __init__(self, cfg):
@@ -91,8 +97,6 @@ class rPPGSpO2FinetuneTrainer(BaseTrainer):
             print(f"[SpO2Finetune] Missing keys ({len(missing)}): {missing[:3]} ...")
 
         # ── 凍結空間特徵萃取，微調時序 + SpO2 分支 ─────────────────────────
-        # 保留 stem + freq_blocks（頻率特徵不破壞）
-        # 微調 hr_branch + spo2_branch + spo2_fusion_head
         FROZEN_PREFIXES = ('stem', 'freq_blocks')
         for name, param in self.model.named_parameters():
             if any(name.startswith(p) for p in FROZEN_PREFIXES):
@@ -103,13 +107,12 @@ class rPPGSpO2FinetuneTrainer(BaseTrainer):
         print(f"[SpO2Finetune] Trainable: {trainable:,} / {total:,} "
               f"(frozen: {total - trainable:,})")
 
-        # ── Losses ────────────────────────────────────────────────────────────
-        self.neg_pearson = NegPearsonLoss()
-
-        # ── Hyperparams ───────────────────────────────────────────────────────
-        ft = cfg.RPPG_SPO2_FINETUNE
+        # ── Losses & Hyperparams ──────────────────────────────────────────────
+        self.neg_pearson     = NegPearsonLoss()
+        ft                   = cfg.RPPG_SPO2_FINETUNE
         self.lambda_spectral = ft.LAMBDA_SPECTRAL
         self.lambda_spo2     = ft.LAMBDA_SPO2
+        self.lambda_unsup    = ft.LAMBDA_UNSUP
         self.grad_clip       = cfg.RPPG_TRAIN.GRAD_CLIP
         self.fps             = float(cfg.RPPG_MODEL.FPS)
         self.freq_low        = float(cfg.RPPG_MODEL.FREQ_LOW)
@@ -118,8 +121,16 @@ class rPPGSpO2FinetuneTrainer(BaseTrainer):
     # ── Training loop ─────────────────────────────────────────────────────────
 
     def train(self, data_loaders: dict) -> dict:
-        train_loader = data_loaders['train']
-        valid_loader = data_loaders.get('valid')
+        labeled_loader   = data_loaders['train']        # MCD-rPPG: BVP + SpO2
+        valid_loader     = data_loaders.get('valid')
+        unlabeled_loader = data_loaders.get('unlabeled')  # UBFC-Phys: BVP only
+
+        has_unsup = unlabeled_loader is not None
+        if has_unsup:
+            print(f"[SpO2Finetune] Semi-supervised: "
+                  f"{len(labeled_loader)} labeled + {len(unlabeled_loader)} unlabeled batches/epoch")
+        else:
+            print("[SpO2Finetune] Supervised only (no unlabeled loader found)")
 
         ft           = self.cfg.RPPG_SPO2_FINETUNE
         total_epochs = ft.EPOCHS
@@ -134,8 +145,8 @@ class rPPGSpO2FinetuneTrainer(BaseTrainer):
         best_val         = float('inf')
         patience_counter = 0
         history = {
-            'loss_total': [], 'loss_rppg': [], 'loss_spectral': [],
-            'loss_spo2': [], 'n_spo2': [], 'val_loss': [],
+            'loss_total':   [], 'loss_labeled': [], 'loss_rppg_l': [],
+            'loss_spo2':    [], 'loss_unsup':   [], 'val_loss':    [],
         }
 
         csv_name = make_rppg_ckpt_name(self.cfg, tag="spo2ft_log").replace(".pth", ".csv")
@@ -144,52 +155,54 @@ class rPPGSpO2FinetuneTrainer(BaseTrainer):
         csv_file   = open(csv_path, 'w', newline='')
         csv_writer = csv.writer(csv_file)
         csv_writer.writerow([
-            'epoch', 'loss_total', 'loss_rppg', 'loss_spectral',
-            'loss_spo2', 'n_spo2_batches', 'val_loss', 'best'
+            'epoch', 'loss_total', 'loss_labeled', 'loss_rppg_l',
+            'loss_spo2', 'loss_unsup', 'val_loss', 'best',
         ])
         csv_file.flush()
 
         for epoch in range(total_epochs):
             self.model.train()
 
-            sum_total = sum_rppg = sum_spec = sum_spo2 = 0.0
-            n_steps = n_spo2_steps = 0
+            # 無限迴圈 unlabeled iterator（與 labeled 對齊，labeled 走完一圈即為一個 epoch）
+            unlabeled_iter = itertools.cycle(unlabeled_loader) if has_unsup else None
 
-            pbar = tqdm(train_loader,
-                        desc=f"SpO2Finetune {epoch+1}/{total_epochs}",
+            sum_total = sum_lab = sum_rppg_l = sum_spo2 = sum_unsup = 0.0
+            n_steps   = 0
+
+            pbar = tqdm(labeled_loader,
+                        desc=f"SpO2Ft {epoch+1}/{total_epochs}",
                         leave=False)
 
-            for video, bvp_label, spo2_label in pbar:
-                video      = video.to(self.device)
-                bvp_label  = bvp_label.to(self.device)
-                spo2_label = spo2_label.to(self.device)   # [B, 1]
+            for video_l, bvp_l, spo2_l in pbar:
+                video_l = video_l.to(self.device)
+                bvp_l   = bvp_l.to(self.device)
+                spo2_l  = spo2_l.to(self.device)   # [B, 1]
 
-                pred_wave, pred_spo2 = self.model(video)
+                pred_wave_l, pred_spo2_l = self.model(video_l)
 
-                # ── rPPG loss（全部樣本）──────────────────────────────────────
-                pred_norm  = _zscore(pred_wave)
-                label_norm = _zscore(bvp_label)
-                loss_rppg  = self.neg_pearson(pred_norm, label_norm) * 100
-                loss_spec  = _spectral_mse(pred_wave, bvp_label,
-                                           fs=self.fps,
-                                           freq_low=self.freq_low,
-                                           freq_high=self.freq_high)
+                # ── Labeled loss（MCD-rPPG）───────────────────────────────────
+                loss_rppg_l, loss_pear_l, _ = _rppg_loss(
+                    pred_wave_l, bvp_l, self.neg_pearson,
+                    self.fps, self.freq_low, self.freq_high, self.lambda_spectral,
+                )
+                loss_spo2 = (F.mse_loss(pred_spo2_l, spo2_l)
+                             + 0.5 * F.l1_loss(pred_spo2_l, spo2_l))
+                loss_labeled = loss_rppg_l + self.lambda_spo2 * loss_spo2
 
-                # ── SpO2 loss（有標籤樣本）────────────────────────────────────
-                # spo2_label == 0.0 → UBFC-Phys，無 SpO2，跳過
-                valid_mask = (spo2_label.squeeze(-1) > 50.0)
-                if valid_mask.any():
-                    pred_v  = pred_spo2[valid_mask]
-                    label_v = spo2_label[valid_mask]
-                    loss_spo2 = (F.mse_loss(pred_v, label_v)
-                                 + 0.5 * F.l1_loss(pred_v, label_v))
-                    n_spo2_steps += 1
-                else:
-                    loss_spo2 = torch.zeros(1, device=self.device)
+                # ── Unlabeled loss（UBFC-Phys：只有 BVP，無 SpO2）─────────────
+                loss_unsup = torch.zeros(1, device=self.device)
+                if unlabeled_iter is not None:
+                    video_u, bvp_u, _ = next(unlabeled_iter)
+                    video_u = video_u.to(self.device)
+                    bvp_u   = bvp_u.to(self.device)
+                    pred_wave_u, _ = self.model(video_u)
+                    loss_unsup_raw, _, _ = _rppg_loss(
+                        pred_wave_u, bvp_u, self.neg_pearson,
+                        self.fps, self.freq_low, self.freq_high, self.lambda_spectral,
+                    )
+                    loss_unsup = self.lambda_unsup * loss_unsup_raw
 
-                loss_total = (loss_rppg
-                              + self.lambda_spectral * loss_spec
-                              + self.lambda_spo2    * loss_spo2)
+                loss_total = loss_labeled + loss_unsup
 
                 opt.zero_grad()
                 loss_total.backward()
@@ -199,30 +212,33 @@ class rPPGSpO2FinetuneTrainer(BaseTrainer):
                 )
                 opt.step()
 
-                sum_total += loss_total.item()
-                sum_rppg  += loss_rppg.item()
-                sum_spec  += loss_spec.item()
-                sum_spo2  += loss_spo2.item()
-                n_steps   += 1
+                sum_total   += loss_total.item()
+                sum_lab     += loss_labeled.item()
+                sum_rppg_l  += loss_rppg_l.item()
+                sum_spo2    += loss_spo2.item()
+                sum_unsup   += loss_unsup.item()
+                n_steps     += 1
 
                 pbar.set_postfix(
                     tot=f"{loss_total.item():.3f}",
-                    rppg=f"{loss_rppg.item():.2f}",
-                    spo2=f"{loss_spo2.item():.3f}" if valid_mask.any() else "skip",
+                    rppg=f"{loss_pear_l.item():.2f}",
+                    spo2=f"{loss_spo2.item():.3f}",
+                    u=f"{loss_unsup.item():.3f}" if has_unsup else "-",
                 )
 
             sched.step()
 
-            avg_total = sum_total / max(n_steps, 1)
-            avg_rppg  = sum_rppg  / max(n_steps, 1)
-            avg_spec  = sum_spec  / max(n_steps, 1)
-            avg_spo2  = sum_spo2  / max(n_spo2_steps, 1)
+            avg_total  = sum_total  / max(n_steps, 1)
+            avg_lab    = sum_lab    / max(n_steps, 1)
+            avg_rppg_l = sum_rppg_l / max(n_steps, 1)
+            avg_spo2   = sum_spo2   / max(n_steps, 1)
+            avg_unsup  = sum_unsup  / max(n_steps, 1)
 
             history['loss_total'].append(avg_total)
-            history['loss_rppg'].append(avg_rppg)
-            history['loss_spectral'].append(avg_spec)
+            history['loss_labeled'].append(avg_lab)
+            history['loss_rppg_l'].append(avg_rppg_l)
             history['loss_spo2'].append(avg_spo2)
-            history['n_spo2'].append(n_spo2_steps)
+            history['loss_unsup'].append(avg_unsup)
 
             # ── Validation ────────────────────────────────────────────────────
             is_best  = False
@@ -232,9 +248,9 @@ class rPPGSpO2FinetuneTrainer(BaseTrainer):
                 history['val_loss'].append(val_loss)
                 print(
                     f"  Epoch {epoch+1:3d} | "
-                    f"tot: {avg_total:.4f}  rppg: {avg_rppg:.4f}  "
-                    f"spec: {avg_spec:.4f}  spo2: {avg_spo2:.4f} "
-                    f"(n={n_spo2_steps}) | Val: {val_loss:.4f}"
+                    f"lab: {avg_lab:.4f}  rppg: {avg_rppg_l:.4f}  "
+                    f"spo2: {avg_spo2:.4f}  unsup: {avg_unsup:.4f} | "
+                    f"Val: {val_loss:.4f}"
                 )
 
                 if val_loss < best_val:
@@ -251,9 +267,9 @@ class rPPGSpO2FinetuneTrainer(BaseTrainer):
                     patience_counter += 1
                     if patience_counter >= patience:
                         csv_writer.writerow([
-                            epoch+1, f"{avg_total:.4f}", f"{avg_rppg:.4f}",
-                            f"{avg_spec:.4f}", f"{avg_spo2:.4f}",
-                            n_spo2_steps, f"{val_loss:.4f}", '',
+                            epoch+1, f"{avg_total:.4f}", f"{avg_lab:.4f}",
+                            f"{avg_rppg_l:.4f}", f"{avg_spo2:.4f}",
+                            f"{avg_unsup:.4f}", f"{val_loss:.4f}", '',
                         ])
                         csv_file.flush()
                         print(f"  Early stopping at epoch {epoch+1}")
@@ -261,14 +277,14 @@ class rPPGSpO2FinetuneTrainer(BaseTrainer):
             else:
                 print(
                     f"  Epoch {epoch+1:3d} | "
-                    f"tot: {avg_total:.4f}  rppg: {avg_rppg:.4f}  "
-                    f"spec: {avg_spec:.4f}  spo2: {avg_spo2:.4f} (n={n_spo2_steps})"
+                    f"lab: {avg_lab:.4f}  rppg: {avg_rppg_l:.4f}  "
+                    f"spo2: {avg_spo2:.4f}  unsup: {avg_unsup:.4f}"
                 )
 
             csv_writer.writerow([
-                epoch+1, f"{avg_total:.4f}", f"{avg_rppg:.4f}",
-                f"{avg_spec:.4f}", f"{avg_spo2:.4f}",
-                n_spo2_steps, f"{val_loss:.4f}", '*' if is_best else '',
+                epoch+1, f"{avg_total:.4f}", f"{avg_lab:.4f}",
+                f"{avg_rppg_l:.4f}", f"{avg_spo2:.4f}",
+                f"{avg_unsup:.4f}", f"{val_loss:.4f}", '*' if is_best else '',
             ])
             csv_file.flush()
 
@@ -282,7 +298,7 @@ class rPPGSpO2FinetuneTrainer(BaseTrainer):
 
     @torch.no_grad()
     def _validate(self, loader) -> float:
-        """Val loss = rPPG Pearson + SpO2 MAE (when available)."""
+        """Val loss = rPPG loss + λ_spo2 × SpO2 MAE（在 labeled val set 上）。"""
         self.model.eval()
         total = 0.0
         ft = self.cfg.RPPG_SPO2_FINETUNE
@@ -291,16 +307,12 @@ class rPPGSpO2FinetuneTrainer(BaseTrainer):
             bvp_label  = bvp_label.to(self.device)
             spo2_label = spo2_label.to(self.device)
             pred_wave, pred_spo2 = self.model(video)
-
-            pred_norm  = _zscore(pred_wave)
-            label_norm = _zscore(bvp_label)
-            loss = self.neg_pearson(pred_norm, label_norm) * 100
-
-            valid_mask = (spo2_label.squeeze(-1) > 50.0)
-            if valid_mask.any():
-                loss = loss + ft.LAMBDA_SPO2 * F.l1_loss(
-                    pred_spo2[valid_mask], spo2_label[valid_mask])
-            total += loss.item()
+            loss_rppg, _, _ = _rppg_loss(
+                pred_wave, bvp_label, self.neg_pearson,
+                self.fps, self.freq_low, self.freq_high, self.lambda_spectral,
+            )
+            loss_spo2 = F.l1_loss(pred_spo2, spo2_label)
+            total += (loss_rppg + ft.LAMBDA_SPO2 * loss_spo2).item()
         self.model.train()
         return total / max(len(loader), 1)
 
@@ -310,7 +322,7 @@ class rPPGSpO2FinetuneTrainer(BaseTrainer):
     # ── Test ──────────────────────────────────────────────────────────────────
 
     def test(self, data_loader, dataset_name: str = "") -> dict:
-        """Evaluate HR metrics + SpO2 metrics + waveform Pearson r."""
+        """評估 HR 指標 + SpO2 指標 + 波形 Pearson r（PURE 有兩者標籤）。"""
         from utils.signal_processing import estimate_hr_fft
         import numpy as np
         from scipy.stats import pearsonr
@@ -330,15 +342,16 @@ class rPPGSpO2FinetuneTrainer(BaseTrainer):
                 label_norm = _zscore(bvp_label.to(self.device))
 
                 for i in range(pred_wave.shape[0]):
-                    p = pred_wave[i].cpu().numpy()
-                    g = bvp_label[i].numpy()
-                    r, _ = pearsonr(pred_norm[i].cpu().numpy(),
-                                    label_norm[i].cpu().numpy())
+                    p_wave = pred_wave[i].cpu().numpy()
+                    g_wave = bvp_label[i].numpy()
+                    r, _   = pearsonr(pred_norm[i].cpu().numpy(),
+                                      label_norm[i].cpu().numpy())
                     wave_rs.append(r)
-                    hr_preds.append(estimate_hr_fft(p, self.cfg.RPPG_MODEL.FPS))
-                    hr_gts.append(estimate_hr_fft(g, self.cfg.RPPG_MODEL.FPS))
+                    hr_preds.append(estimate_hr_fft(p_wave, self.cfg.RPPG_MODEL.FPS))
+                    hr_gts.append(estimate_hr_fft(g_wave,  self.cfg.RPPG_MODEL.FPS))
 
                     spo2_val = float(spo2_label[i].item())
+                    # spo2 > 50 → 有效標籤（PURE 範圍 ~97-100%）
                     if spo2_val > 50.0:
                         spo2_preds.append(float(pred_spo2[i].item()))
                         spo2_gts.append(spo2_val)
@@ -360,14 +373,17 @@ class rPPGSpO2FinetuneTrainer(BaseTrainer):
             spo2_gts   = np.array(spo2_gts)
             spo2_mae   = float(np.mean(np.abs(spo2_preds - spo2_gts)))
             spo2_rmse  = float(np.sqrt(np.mean((spo2_preds - spo2_gts) ** 2)))
-            spo2_r, _  = pearsonr(spo2_preds, spo2_gts) if len(spo2_preds) > 1 else (float('nan'), None)
+            if len(spo2_preds) > 1:
+                spo2_r, _ = pearsonr(spo2_preds, spo2_gts)
+            else:
+                spo2_r = float('nan')
             print(f"  [Test]{tag} SpO2 MAE: {spo2_mae:.3f}% | "
                   f"RMSE: {spo2_rmse:.3f}% | r: {spo2_r:.4f} "
-                  f"(n={len(spo2_preds)})")
+                  f"(n={len(spo2_preds)} / {len(hr_preds)})")
             result.update({
                 'spo2_mae': spo2_mae, 'spo2_rmse': spo2_rmse, 'spo2_r': spo2_r,
             })
         else:
-            print(f"  [Test]{tag} SpO2: no labeled samples in this set")
+            print(f"  [Test]{tag} SpO2: 此資料集無 SpO2 標籤（spo2=0）")
 
         return result

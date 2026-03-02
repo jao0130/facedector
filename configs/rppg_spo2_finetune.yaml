@@ -65,7 +65,9 @@ RPPG_SPO2_FINETUNE:
   LAMBDA_UNSUP:    1.0      # 無 SpO2 標籤樣本的 rPPG 無監督 loss 權重
 
   # 半監督：只有 BVP 的無 SpO2 標籤資料
-  UNLABELED_PATH:       "D:/PreprocessedData_UBFCPhys"
+  # UBFC-rPPG 已有前處理結果（無 spo2.npy → 自動視為 0.0）
+  # 注意：使用後 UBFC 不再是獨立 rPPG 測試集，SpO2 測試改用 PURE
+  UNLABELED_PATH:       "D:/PreprocessedData_UBFC"
   UNLABELED_BATCH_SIZE: 8
 
 OUTPUT:

@@ -105,8 +105,19 @@ def main():
             print(f"\n[Done] Semi-supervised rPPG training complete.")
             _run_all_tests(trainer, data_loaders)
 
+    elif cfg.TASK == "rppg_finetune":
+        from data.dataset_rppg import create_rppg_dataloaders
+        from trainers.rppg_waveform_finetune_trainer import rPPGWaveformFinetuneTrainer
+
+        data_loaders = create_rppg_dataloaders(cfg)
+        trainer = rPPGWaveformFinetuneTrainer(cfg)
+
+        history = trainer.train(data_loaders)
+        print(f"\n[Done] Waveform fine-tune complete.")
+        _run_all_tests(trainer, data_loaders)
+
     else:
-        print(f"[Error] Unknown task: {cfg.TASK}. Use 'face_detection', 'rppg', or 'rppg_semi'.")
+        print(f"[Error] Unknown task: {cfg.TASK}. Use 'face_detection', 'rppg', 'rppg_semi', or 'rppg_finetune'.")
         sys.exit(1)
 
 

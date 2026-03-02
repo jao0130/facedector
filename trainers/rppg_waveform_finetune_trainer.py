@@ -24,6 +24,12 @@ rPPG Waveform Fine-tune Trainer (Stage-2 Training)
 Loss：
   L_G = NegPearson(×100) + λ_mse × Z-MSE + λ_adv × LSGAN_G   (warmup 後)
   L_D = 0.5 × [MSE(D(real), 0.9) + MSE(D(fake), 0)]
+
+DiffNorm → Discriminator 修正（cumsum）：
+  標籤是 DiffNormalized（BVP 一階差分），形狀為正負脈衝對，
+  不含平滑波峰的 shape prior，Discriminator 無法有效學習 PPG 形狀。
+  修正：餵給 D 之前先做 cumsum 積分還原成近似 raw BVP，
+       zscore 消除 DC drift 後 D 才能判斷「是否有合理 PPG 波形」。
 """
 
 import csv
@@ -44,6 +50,34 @@ from losses.rppg_losses import NegPearsonLoss
 def _zscore(x: torch.Tensor) -> torch.Tensor:
     """Z-score normalize along time axis [B, T]."""
     return (x - x.mean(dim=1, keepdim=True)) / (x.std(dim=1, keepdim=True).clamp(min=1e-8))
+
+
+def _integrate(x: torch.Tensor) -> torch.Tensor:
+    """DiffNorm → 近似 raw BVP：cumsum 積分後 zscore 消除 DC drift。[B, T]"""
+    return _zscore(torch.cumsum(x, dim=-1))
+
+
+def _spectral_mse(pred: torch.Tensor, target: torch.Tensor,
+                  fs: float = 30.0,
+                  freq_low: float = 0.7, freq_high: float = 2.5) -> torch.Tensor:
+    """
+    頻域能量分佈 MSE（cardiac band）。
+
+    直接約束預測訊號在心跳頻率段的頻譜形狀，防止 Z-MSE 的時域對齊壓力
+    造成主頻漂移→心率估計下滑。
+
+    Input:  [B, T]（DiffNorm 訊號，zscore 前後皆可）
+    Output: scalar loss
+    """
+    N = pred.shape[-1]
+    pred_mag   = torch.abs(torch.fft.rfft(pred,   dim=-1))   # [B, N//2+1]
+    target_mag = torch.abs(torch.fft.rfft(target, dim=-1))
+
+    # 建立心跳頻率遮罩（不可微，但只影響哪些 bin 參與計算，梯度仍正確流通）
+    freqs = torch.linspace(0, fs / 2, pred_mag.shape[-1], device=pred.device)
+    mask  = (freqs >= freq_low) & (freqs <= freq_high)        # [N//2+1] bool
+
+    return F.mse_loss(pred_mag[:, mask], target_mag[:, mask])
 
 
 # ── LSGAN Discriminator ───────────────────────────────────────────────────────
@@ -140,10 +174,14 @@ class rPPGWaveformFinetuneTrainer(BaseTrainer):
 
         # ── Hyperparams ───────────────────────────────────────────────────────
         ft = cfg.RPPG_FINETUNE
-        self.lambda_mse    = ft.LAMBDA_MSE
-        self.lambda_adv    = ft.LAMBDA_ADV
-        self.warmup_epochs = ft.WARMUP_EPOCHS
-        self.grad_clip     = cfg.RPPG_TRAIN.GRAD_CLIP
+        self.lambda_mse      = ft.LAMBDA_MSE
+        self.lambda_spectral = ft.LAMBDA_SPECTRAL
+        self.lambda_adv      = ft.LAMBDA_ADV
+        self.warmup_epochs   = ft.WARMUP_EPOCHS
+        self.grad_clip       = cfg.RPPG_TRAIN.GRAD_CLIP
+        self.fps             = float(cfg.RPPG_MODEL.FPS)
+        self.freq_low        = float(cfg.RPPG_MODEL.FREQ_LOW)
+        self.freq_high       = float(cfg.RPPG_MODEL.FREQ_HIGH)
 
     # ── Training loop ─────────────────────────────────────────────────────────
 
@@ -170,7 +208,7 @@ class rPPGWaveformFinetuneTrainer(BaseTrainer):
         best_val         = float('inf')
         patience_counter = 0
         history = {'loss_g': [], 'loss_pearson': [], 'loss_mse': [],
-                   'loss_adv': [], 'loss_d': [], 'val_loss': []}
+                   'loss_spectral': [], 'loss_adv': [], 'loss_d': [], 'val_loss': []}
 
         # Per-epoch CSV log
         csv_name = make_rppg_ckpt_name(self.cfg, tag="finetune_log").replace(".pth", ".csv")
@@ -179,7 +217,7 @@ class rPPGWaveformFinetuneTrainer(BaseTrainer):
         csv_writer = csv.writer(csv_file)
         csv_writer.writerow([
             'epoch', 'loss_g', 'loss_pearson', 'loss_mse',
-            'loss_adv', 'loss_d', 'val_loss', 'best'
+            'loss_spectral', 'loss_adv', 'loss_d', 'val_loss', 'best'
         ])
         csv_file.flush()
 
@@ -189,7 +227,7 @@ class rPPGWaveformFinetuneTrainer(BaseTrainer):
 
             use_adv = epoch >= self.warmup_epochs
 
-            sum_g = sum_pear = sum_mse = sum_adv = sum_d = 0.0
+            sum_g = sum_pear = sum_mse = sum_spec = sum_adv = sum_d = 0.0
             n_steps = len(train_loader)
 
             pbar = tqdm(train_loader,
@@ -206,16 +244,25 @@ class rPPGWaveformFinetuneTrainer(BaseTrainer):
                 pred_norm    = _zscore(pred_wave)
                 label_norm   = _zscore(bvp_label)
 
-                loss_pearson = self.neg_pearson(pred_norm, label_norm) * 100
-                loss_mse     = F.mse_loss(pred_norm, label_norm)
+                loss_pearson  = self.neg_pearson(pred_norm, label_norm) * 100
+                loss_mse      = F.mse_loss(pred_norm, label_norm)
+                # 頻域能量約束：直接防止主頻漂移（Z-MSE 時域壓力的補充）
+                loss_spectral = _spectral_mse(pred_wave, bvp_label,
+                                              fs=self.fps,
+                                              freq_low=self.freq_low,
+                                              freq_high=self.freq_high)
 
                 loss_adv = torch.zeros(1, device=self.device)
                 if use_adv:
-                    d_pred   = self.disc(pred_norm)
+                    # cumsum 積分：DiffNorm → 近似 raw BVP，D 才能學 PPG shape prior
+                    pred_integrated = _integrate(pred_wave)
+                    d_pred   = self.disc(pred_integrated)
                     loss_adv = F.mse_loss(d_pred, torch.ones_like(d_pred))
 
-                loss_g = loss_pearson + self.lambda_mse * loss_mse \
-                       + self.lambda_adv * loss_adv
+                loss_g = (loss_pearson
+                          + self.lambda_mse      * loss_mse
+                          + self.lambda_spectral * loss_spectral
+                          + self.lambda_adv      * loss_adv)
 
                 opt_g.zero_grad()
                 loss_g.backward()
@@ -230,9 +277,10 @@ class rPPGWaveformFinetuneTrainer(BaseTrainer):
                 if use_adv:
                     with torch.no_grad():
                         pred_wave_d, _ = self.model(video)
-                        pred_norm_d    = _zscore(pred_wave_d)
-                    d_real = self.disc(label_norm.detach())
-                    d_fake = self.disc(pred_norm_d)
+                        pred_integrated_d = _integrate(pred_wave_d)
+                    label_integrated = _integrate(bvp_label)
+                    d_real = self.disc(label_integrated.detach())
+                    d_fake = self.disc(pred_integrated_d)
                     # LSGAN: real→0.9 (label smoothing), fake→0
                     loss_d = 0.5 * (
                         F.mse_loss(d_real, torch.full_like(d_real, 0.9)) +
@@ -245,13 +293,14 @@ class rPPGWaveformFinetuneTrainer(BaseTrainer):
                 sum_g    += loss_g.item()
                 sum_pear += loss_pearson.item()
                 sum_mse  += loss_mse.item()
+                sum_spec += loss_spectral.item()
                 sum_adv  += loss_adv.item()
                 sum_d    += loss_d.item()
 
                 pbar.set_postfix(
                     G=f"{loss_g.item():.3f}",
                     pear=f"{loss_pearson.item():.2f}",
-                    mse=f"{loss_mse.item():.3f}",
+                    spec=f"{loss_spectral.item():.3f}",
                     adv=f"{loss_adv.item():.3f}" if use_adv else "warm",
                     D=f"{loss_d.item():.3f}" if use_adv else "-",
                 )
@@ -262,12 +311,14 @@ class rPPGWaveformFinetuneTrainer(BaseTrainer):
             avg_g    = sum_g    / n_steps
             avg_pear = sum_pear / n_steps
             avg_mse  = sum_mse  / n_steps
+            avg_spec = sum_spec / n_steps
             avg_adv  = sum_adv  / n_steps
             avg_d    = sum_d    / n_steps
 
             history['loss_g'].append(avg_g)
             history['loss_pearson'].append(avg_pear)
             history['loss_mse'].append(avg_mse)
+            history['loss_spectral'].append(avg_spec)
             history['loss_adv'].append(avg_adv)
             history['loss_d'].append(avg_d)
 
@@ -298,7 +349,8 @@ class rPPGWaveformFinetuneTrainer(BaseTrainer):
                     if patience_counter >= patience:
                         csv_writer.writerow([
                             epoch + 1, f"{avg_g:.4f}", f"{avg_pear:.4f}",
-                            f"{avg_mse:.4f}", f"{avg_adv:.4f}", f"{avg_d:.4f}",
+                            f"{avg_mse:.4f}", f"{avg_spec:.4f}",
+                            f"{avg_adv:.4f}", f"{avg_d:.4f}",
                             f"{val_loss:.4f}", '',
                         ])
                         csv_file.flush()
@@ -314,7 +366,8 @@ class rPPGWaveformFinetuneTrainer(BaseTrainer):
 
             csv_writer.writerow([
                 epoch + 1, f"{avg_g:.4f}", f"{avg_pear:.4f}",
-                f"{avg_mse:.4f}", f"{avg_adv:.4f}", f"{avg_d:.4f}",
+                f"{avg_mse:.4f}", f"{avg_spec:.4f}",
+                f"{avg_adv:.4f}", f"{avg_d:.4f}",
                 f"{val_loss:.4f}", '*' if is_best else '',
             ])
             csv_file.flush()

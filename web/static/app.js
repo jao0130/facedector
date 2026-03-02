@@ -5,7 +5,7 @@ import { FaceLandmarker, FilesetResolver } from
 const INPUT_SIZE      = 72;
 const LARGE_BOX_COEF  = 1.5;
 const FACE_THRESHOLD  = 0.4;
-const MODEL_URL       = 'models/rppg_fcatt_v2.onnx';
+const MODEL_URL       = 'models/rppg_fcatt_v3.onnx';
 const ORT_WASM        = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/';
 const MP_WASM         = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
 const MP_MODEL        = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task';

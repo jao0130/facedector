@@ -7,7 +7,7 @@ GPU_MEMORY_LIMIT_MB: 13000
 RPPG_MODEL:
   # ── 選擇模型 ───────────────────────────────────────────────────────────────
   # "FCAtt_v2" 或 "FCAtt_v3"
-  NAME: "FCAtt_v2"
+  NAME: "FCAtt_v3"
 
   # ── V2 / V3 共用參數 ────────────────────────────────────────────────────────
   FRAMES:    128
@@ -19,18 +19,17 @@ RPPG_MODEL:
 
   # ── FrequencyAttention 共用（V2 / V3 皆讀取）─────────────────────────────
   FREQ_ATT_POOL_SIZE:       8     # V2: freq_att_pool_size  / V3: pool_size
-  FREQ_ATT_TEMPORAL_KERNEL: 7     # V2: 預設 7              / V3: 預設 3（架構差異）
+  FREQ_ATT_TEMPORAL_KERNEL: 5     # V2: 預設 7              / V3: checkpoint 實際用 5
   FREQ_ATT_SHARPNESS:       10.0  # V2: freq_att_sharpness  / V3: sharpness
 
   # ── V3 專用 ────────────────────────────────────────────────────────────────
-  # (NAME="FCAtt_v2" 時以下兩個參數會被忽略)
   NUM_FREQ_BLOCKS: 3    # V3: FrequencyAttentionBlock 堆疊數
   INPUT_SIZE:      72   # V3: poolspa 固定尺寸計算用
 
   # ── 預訓練權重（Stage-1 checkpoint，必填）──────────────────────────────────
   # FCAtt_v2 checkpoint:  checkpoints/rppg_semi/rppg_fcatt_v2_128f_72px_best.pth
   # FCAtt_v3 checkpoint:  checkpoints/rppg_semi_V3/rppg_fcatt_v3_128f_72px_best.pth
-  WEIGHTS: "checkpoints/rppg_semi/rppg_fcatt_v2_128f_72px_best.pth"
+  WEIGHTS: "checkpoints/rppg_semi_V3/rppg_fcatt_v3_128f_72px_best.pth"
 
 RPPG_DATA:
   DATASET:      "PURE+MCD-rPPG"
@@ -65,14 +64,15 @@ RPPG_TRAIN:
   GRAD_CLIP:  1.0
 
 RPPG_FINETUNE:
-  EPOCHS:         30
-  PATIENCE:       15
-  LR_G:           5.0e-5   # Generator (HRBranch)：小 LR 保留頻率特徵
-  LR_D:           2.0e-4   # Discriminator：略快確保判別能力
-  LAMBDA_MSE:     10.0     # Z-score MSE 權重（與 NegPearson×100 量級匹配）
-  LAMBDA_ADV:     0.1      # Adversarial 權重（保守，避免 GAN 不穩定）
-  WARMUP_EPOCHS:  5        # 前 N epoch 只用 supervised loss
+  EPOCHS:          100
+  PATIENCE:        15
+  LR_G:            3.0e-5   # V3 已收斂佳，用更小 LR 避免破壞頻率特徵
+  LR_D:            2.0e-4   # Discriminator：略快確保判別能力
+  LAMBDA_MSE:      3.0      # 降低時域 MSE，避免對齊壓力造成主頻漂移
+  LAMBDA_SPECTRAL: 5.0      # 頻域能量 MSE：直接約束心跳頻段，防止 HR 下滑
+  LAMBDA_ADV:      0.8      # cumsum 修正後 GAN 有效，適度提高權重
+  WARMUP_EPOCHS:   5        # 前 N epoch 只用 supervised loss
 
 OUTPUT:
-  CHECKPOINT_DIR: "checkpoints/rppg_finetune"
-  LOG_DIR:        "logs/rppg_finetune"
+  CHECKPOINT_DIR: "checkpoints/rppg_finetune_v3"
+  LOG_DIR:        "logs/rppg_finetune_v3"

@@ -37,7 +37,12 @@ def bandpass_filter(signal: np.ndarray, fs: float,
 def estimate_hr_fft(signal: np.ndarray, fs: float,
                     freq_low: float = 0.75, freq_high: float = 2.5) -> float:
     """
-    FFT-based heart rate estimation.
+    FFT-based heart rate estimation with Hanning window + parabolic interpolation.
+
+    改進：
+      1. Bandpass 先濾除帶外雜訊，避免帶外假峰值
+      2. Hanning window 降低頻譜洩漏（消除相鄰 bin 污染）
+      3. 拋物線插值達到 sub-bin 精度（~2 BPM vs 原本 14 BPM/bin）
 
     Args:
         signal: 1D rPPG signal.
@@ -48,21 +53,42 @@ def estimate_hr_fft(signal: np.ndarray, fs: float,
     Returns:
         Estimated heart rate in BPM.
     """
-    N = len(signal)
-    fft_vals = np.fft.rfft(signal)
-    fft_freqs = np.fft.rfftfreq(N, d=1.0 / fs)
+    # 1. Bandpass filter to cardiac band before FFT
+    filtered = bandpass_filter(signal, fs, low=freq_low, high=freq_high)
 
-    # Mask to cardiac frequency band
+    # 2. Hanning window to reduce spectral leakage
+    N = len(filtered)
+    window = np.hanning(N)
+    windowed = filtered * window
+
+    # 3. FFT
+    fft_vals  = np.fft.rfft(windowed)
+    fft_freqs = np.fft.rfftfreq(N, d=1.0 / fs)
+    bin_width = fft_freqs[1] - fft_freqs[0]  # Hz per bin
+
+    # 4. Find peak within cardiac band
     mask = (fft_freqs >= freq_low) & (fft_freqs <= freq_high)
     if not np.any(mask):
         return 0.0
 
     magnitudes = np.abs(fft_vals)
-    magnitudes_masked = magnitudes * mask
+    magnitudes_in_band = magnitudes.copy()
+    magnitudes_in_band[~mask] = 0.0
+    peak_idx = int(np.argmax(magnitudes_in_band))
 
-    peak_idx = np.argmax(magnitudes_masked)
-    peak_freq = fft_freqs[peak_idx]
+    # 5. Parabolic interpolation for sub-bin frequency accuracy
+    if 0 < peak_idx < len(magnitudes) - 1:
+        alpha = magnitudes[peak_idx - 1]
+        beta  = magnitudes[peak_idx]
+        gamma = magnitudes[peak_idx + 1]
+        denom = alpha - 2.0 * beta + gamma
+        delta = 0.5 * (alpha - gamma) / (denom + 1e-10) if abs(denom) > 1e-10 else 0.0
+        peak_freq = fft_freqs[peak_idx] + delta * bin_width
+    else:
+        peak_freq = fft_freqs[peak_idx]
 
+    # Clamp to valid physiological range
+    peak_freq = float(np.clip(peak_freq, freq_low, freq_high))
     return peak_freq * 60.0  # Hz -> BPM
 
 

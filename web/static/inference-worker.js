@@ -109,7 +109,7 @@ self.onmessage = async (e) => {
   }
 };
 
-// ── Raw Tensor (V2 model has built-in DiffNormalizeLayer) ────────────────────
+// ── Raw Tensor (V3 model has built-in DiffNormalizeLayer) ────────────────────
 // Input: raw RGB pixels 0-255, shape [1, 3, T, H, W] in CHW planar layout
 function toRawTensor() {
   const T   = BUFFER_SIZE;

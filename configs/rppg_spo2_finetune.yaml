@@ -1,0 +1,67 @@
+TASK:                "rppg_spo2_finetune"
+DEVICE:              "cuda:0"
+NUM_WORKERS:         0
+SEED:                42
+GPU_MEMORY_LIMIT_MB: 13000
+
+RPPG_MODEL:
+  NAME: "FCAtt_v3"
+  FRAMES:    128
+  FPS:       30
+  FREQ_LOW:  0.7
+  FREQ_HIGH: 2.5
+  SPO2_MIN:   85.0
+  SPO2_RANGE: 15.0
+  FREQ_ATT_POOL_SIZE:       8
+  FREQ_ATT_TEMPORAL_KERNEL: 5
+  FREQ_ATT_SHARPNESS:       10.0
+  NUM_FREQ_BLOCKS: 3
+  INPUT_SIZE:      72
+
+  # 從 waveform fine-tune checkpoint 出發
+  WEIGHTS: "checkpoints/rppg_finetune_v3/rppg_fcatt_v3_128f_72px_finetune_best.pth"
+
+RPPG_DATA:
+  DATASET:      "MCD-rPPG+UBFC-Phys"
+  DATA_PATH:    ""
+  CACHED_PATH:  ""
+  CACHED_PATHS:
+    - "D:/PreprocessedData_MCD"        # MCD-rPPG: BVP + SpO2
+    - "D:/PreprocessedData_UBFCPhys"   # UBFC-Phys: BVP only (spo2=0)
+  FS:           30
+  CHUNK_LENGTH: 128
+  LABEL_TYPE:   "DiffNormalized"
+  DATA_TYPE:    "Raw"
+  CROP_FACE:    true
+  LARGE_BOX_COEF: 1.5
+  RESIZE_W:     72
+  RESIZE_H:     72
+  DO_PREPROCESS: false
+
+  TEST_DATASET:      "PURE"
+  TEST_DATA_PATH:    ""
+  TEST_CACHED_PATH:  ""
+  TEST_CACHED_PATHS:
+    - "D:/PreprocessedData"            # PURE: BVP + SpO2
+
+  TRAIN_BEGIN: 0.0
+  TRAIN_END:   0.8
+  VALID_BEGIN: 0.8
+  VALID_END:   1.0
+  TEST_BEGIN:  0.0
+  TEST_END:    1.0
+
+RPPG_TRAIN:
+  BATCH_SIZE: 8
+  GRAD_CLIP:  1.0
+
+RPPG_SPO2_FINETUNE:
+  EPOCHS:          60
+  PATIENCE:        15
+  LR:              2.0e-5   # 保守學習率：SpO2 head 比 HR branch 更脆弱
+  LAMBDA_SPECTRAL: 3.0      # 保持 rPPG 頻域能量，防止 HR 品質下滑
+  LAMBDA_SPO2:     10.0     # SpO2 MSE+MAE 相對 rPPG Pearson 的權重
+
+OUTPUT:
+  CHECKPOINT_DIR: "checkpoints/rppg_spo2_finetune"
+  LOG_DIR:        "logs/rppg_spo2_finetune"

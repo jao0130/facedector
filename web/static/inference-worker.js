@@ -91,15 +91,16 @@ self.onmessage = async (e) => {
       const rppgWave = waveOut.data;
       const spo2Raw  = spo2Out.data[0];
 
-      const hrRaw  = estimateHR(rppgWave, 30);
-      const hr     = smoothHR(hrRaw);
-      const spo2   = smoothSpo2((isNaN(spo2Raw) || spo2Raw === 0) ? 0 : Math.max(85, Math.min(100, spo2Raw)));
+      const hrRaw    = estimateHR(rppgWave, 30);
+      const hr       = smoothHR(hrRaw);
+      const spo2     = smoothSpo2((isNaN(spo2Raw) || spo2Raw === 0) ? 0 : Math.max(85, Math.min(100, spo2Raw)));
+      const cleanWave = harmonicReconstruct(rppgWave, hr, 30);
 
       self.postMessage({
         type:     'result',
         hr_bpm:   Math.round(hr * 10) / 10,
         spo2:     Math.round(spo2 * 10) / 10,
-        ppg_wave: rppgWave.slice(-PREDICT_EVERY),  // 最新 30 samples（非重疊部分）
+        ppg_wave: cleanWave.slice(-PREDICT_EVERY),  // 最新 30 samples，諧波重建後
       });
     } catch (err) {
       self.postMessage({ type: 'error', message: 'Inference error: ' + err.message });
@@ -178,6 +179,70 @@ function estimateHR(signal, fs) {
   }
 
   return peakFreq * 60;
+}
+
+// ── Harmonic Waveform Reconstruction ─────────────────────────────────────────
+// 利用 FFT 提取心率諧波 (f₀, 2f₀, 3f₀, 4f₀) 後在時域重建。
+// 相比 bandpass，諧波重建追蹤實際 HR 頻率，濾除所有帶內非心臟雜訊，
+// 使波形視覺上接近真實 PPG（平滑、週期性、峰谷清晰）。
+function harmonicReconstruct(signal, hr_bpm, fs, numHarmonics) {
+  if (!numHarmonics) numHarmonics = 4;
+  const f0 = hr_bpm / 60;
+  const N  = signal.length;
+  const dt = 1.0 / fs;
+  const K  = Math.floor(N / 2) + 1;
+  const binWidth = fs / N;
+
+  // Hanning 窗（與 estimateHR 一致，減少旁瓣洩漏）
+  const win = new Float32Array(N);
+  for (let n = 0; n < N; n++)
+    win[n] = 0.5 * (1 - Math.cos(2 * Math.PI * n / (N - 1)));
+
+  // 逐諧波提取幅度與相位
+  const harmonics = [];
+  for (let h = 1; h <= numHarmonics; h++) {
+    const fh = f0 * h;
+    if (fh > fs / 2) break;
+    const k = Math.round(fh / binWidth);
+    if (k <= 0 || k >= K) continue;
+
+    let re = 0, im = 0;
+    for (let n = 0; n < N; n++) {
+      const angle = -2 * Math.PI * k * n / N;
+      const ws    = signal[n] * win[n];
+      re += ws * Math.cos(angle);
+      im += ws * Math.sin(angle);
+    }
+    // 幅度（乘以 2/N 還原單邊頻譜；ortho 縮放無需額外除以 sqrt(N)）
+    harmonics.push({
+      f:     fh,
+      amp:   Math.sqrt(re * re + im * im) * 2 / N,
+      phase: Math.atan2(im, re),
+    });
+  }
+
+  // 無有效諧波時回退到原始訊號
+  if (harmonics.length === 0) return signal.slice ? signal.slice(0) : new Float32Array(signal);
+
+  // 時域重建：Σ Aₙ cos(2π·fₙ·t + φₙ)
+  const out = new Float32Array(N);
+  for (let n = 0; n < N; n++) {
+    let v = 0;
+    for (const { f, amp, phase } of harmonics)
+      v += amp * Math.cos(2 * Math.PI * f * n * dt + phase);
+    out[n] = v;
+  }
+
+  // Z-score 正規化（統一動態範圍，便於顯示）
+  let mean = 0;
+  for (let n = 0; n < N; n++) mean += out[n];
+  mean /= N;
+  let variance = 0;
+  for (let n = 0; n < N; n++) variance += (out[n] - mean) ** 2;
+  const std = Math.sqrt(variance / N) + 1e-7;
+  for (let n = 0; n < N; n++) out[n] = (out[n] - mean) / std;
+
+  return out;
 }
 
 // ── EMA 平滑：HR ──────────────────────────────────────────────────────────────

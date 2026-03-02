@@ -116,8 +116,20 @@ def main():
         print(f"\n[Done] Waveform fine-tune complete.")
         _run_all_tests(trainer, data_loaders)
 
+    elif cfg.TASK == "rppg_spo2_finetune":
+        from data.dataset_rppg import create_rppg_dataloaders
+        from trainers.rppg_spo2_finetune_trainer import rPPGSpO2FinetuneTrainer
+
+        data_loaders = create_rppg_dataloaders(cfg)
+        trainer = rPPGSpO2FinetuneTrainer(cfg)
+
+        history = trainer.train(data_loaders)
+        print(f"\n[Done] SpO2 fine-tune complete.")
+        _run_all_tests(trainer, data_loaders)
+
     else:
-        print(f"[Error] Unknown task: {cfg.TASK}. Use 'face_detection', 'rppg', 'rppg_semi', or 'rppg_finetune'.")
+        print(f"[Error] Unknown task: {cfg.TASK}. "
+              f"Use 'face_detection', 'rppg', 'rppg_semi', 'rppg_finetune', or 'rppg_spo2_finetune'.")
         sys.exit(1)
 
 

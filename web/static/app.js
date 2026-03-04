@@ -34,6 +34,9 @@ const trendCanvas  = document.getElementById('trend-canvas');
 const trendCtx     = trendCanvas.getContext('2d');
 const qualityValue = document.getElementById('quality-value');
 const recordBtn    = document.getElementById('record-btn');
+const hintSection  = document.getElementById('hint-section');
+const hintTitle    = document.getElementById('hint-title');
+const hintBody     = document.getElementById('hint-body');
 
 // ── State ────────────────────────────────────────────────────────────────────
 let faceLandmarker = null;
@@ -451,6 +454,29 @@ function updateUI(face) {
   } else {
     qualityValue.textContent = '--';
     qualityValue.style.color = '';
+  }
+
+  // Hint section
+  if (!face || snr === 0) {
+    hintSection.classList.add('hidden');
+  } else if (snr < 30) {
+    hintSection.classList.remove('hidden');
+    hintSection.classList.add('poor');
+    hintTitle.textContent = '⚠ 訊號品質差，可能原因';
+    hintBody.innerHTML = [
+      '· 光線不足或分布不均',
+      '· 頭部 / 臉部移動過大',
+      '· 距鏡頭過遠（建議 30–60 cm）',
+      '· 強烈逆光或側光',
+      '· 口罩、帽子等臉部遮蔽',
+    ].map(t => `<div>${t}</div>`).join('');
+  } else if (snr < 60) {
+    hintSection.classList.remove('hidden');
+    hintSection.classList.remove('poor');
+    hintTitle.textContent = '↑ 改善建議';
+    hintBody.innerHTML = '<div>確保光線充足、正面面對鏡頭並保持靜止</div>';
+  } else {
+    hintSection.classList.add('hidden');
   }
 }
 

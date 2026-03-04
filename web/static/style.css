@@ -355,6 +355,41 @@ main {
   display: block;
 }
 
+/* ── Hint Section ──────────────────────────────────────────────────────── */
+#hint-section {
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--accent-amber);
+  background: rgba(255, 170, 0, 0.04);
+  font-size: 10px;
+  line-height: 1.8;
+  transition: border-color 0.3s, background 0.3s;
+}
+
+#hint-section.poor {
+  border-color: var(--accent-red);
+  background: rgba(255, 51, 85, 0.04);
+}
+
+#hint-title {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  color: var(--accent-amber);
+  margin-bottom: 6px;
+}
+
+#hint-section.poor #hint-title {
+  color: var(--accent-red);
+}
+
+#hint-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  color: var(--text-dim);
+}
+
 /* ── Scrollbar ─────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }

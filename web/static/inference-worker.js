@@ -91,7 +91,7 @@ self.onmessage = async (e) => {
       const rppgWave = waveOut.data;
       const spo2Raw  = spo2Out.data[0];
 
-      const hrRaw    = estimateHR(rppgWave, 30);
+      const { hr: hrRaw, snr } = estimateHR(rppgWave, 30);
       const hr       = smoothHR(hrRaw);
       const spo2     = smoothSpo2((isNaN(spo2Raw) || spo2Raw === 0) ? 0 : Math.max(85, Math.min(100, spo2Raw)));
       const cleanWave = harmonicReconstruct(rppgWave, hr, 30);
@@ -100,6 +100,7 @@ self.onmessage = async (e) => {
         type:     'result',
         hr_bpm:   Math.round(hr * 10) / 10,
         spo2:     Math.round(spo2 * 10) / 10,
+        snr:      snr,
         ppg_wave: cleanWave.slice(-PREDICT_EVERY),  // 最新 30 samples，諧波重建後
       });
     } catch (err) {
@@ -178,7 +179,13 @@ function estimateHR(signal, fs) {
     }
   }
 
-  return peakFreq * 60;
+  // Signal-to-noise ratio: peak bin power vs remaining band power (0–100)
+  let totalPower = 0;
+  for (let k = 0; k < K; k++) totalPower += mags[k];
+  const noisePower = Math.max(totalPower - maxMag, 1e-10);
+  const snr = Math.round(Math.min(100, Math.max(0, (maxMag / noisePower - 1) * 25)));
+
+  return { hr: peakFreq * 60, snr };
 }
 
 // ── Harmonic Waveform Reconstruction ─────────────────────────────────────────

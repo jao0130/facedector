@@ -87,6 +87,29 @@ header {
   text-align: right;
 }
 
+/* ── Record Button ─────────────────────────────────────────────────────── */
+#record-btn {
+  background: none;
+  border: 1px solid var(--text-muted);
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 2px;
+  padding: 5px 12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: border-color 0.3s, color 0.3s;
+}
+
+#record-btn:hover { border-color: var(--accent-red); color: var(--accent-red); }
+
+#record-btn.recording {
+  border-color: var(--accent-red);
+  color: var(--accent-red);
+  animation: pulse 1s ease-in-out infinite;
+}
+
 /* ── Main Layout ───────────────────────────────────────────────────────── */
 main {
   display: grid;
@@ -205,6 +228,35 @@ main {
 }
 #card-spo2.alert .vital-value {
   color: var(--accent-red);
+}
+
+/* ── Trend Section ─────────────────────────────────────────────────────── */
+#trend-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.section-label {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 2px;
+  color: var(--text-dim);
+}
+
+#trend-canvas {
+  width: 100%;
+  height: 80px;
+  display: block;
+  border-radius: var(--radius);
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
 }
 
 /* ── Buffer Section ────────────────────────────────────────────────────── */

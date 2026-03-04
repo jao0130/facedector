@@ -29,12 +29,16 @@ const pipelineFps = document.getElementById('pipeline-fps');
 const ppgCanvas   = document.getElementById('ppg-canvas');
 const ppgCtx      = ppgCanvas.getContext('2d');
 const ppgBpmEl    = document.getElementById('ppg-bpm');
+const trendCanvas  = document.getElementById('trend-canvas');
+const trendCtx     = trendCanvas.getContext('2d');
+const qualityValue = document.getElementById('quality-value');
+const recordBtn    = document.getElementById('record-btn');
 
 // ── State ────────────────────────────────────────────────────────────────────
 let faceLandmarker = null;
 let worker         = null;
 let workerReady    = false;
-let latestVitals   = { hr_bpm: 0, spo2: 0 };
+let latestVitals   = { hr_bpm: 0, spo2: 0, snr: 0 };
 let bufFilled      = 0;
 let bufTotal       = 128;
 let fpsCount       = 0;
@@ -46,6 +50,17 @@ const PPG_BUFFER_LEN = 300;                        // 10 秒 @ 30 Hz
 const ppgBuffer      = new Float32Array(PPG_BUFFER_LEN);
 let   ppgWriteIdx    = 0;
 let   ppgHasData     = false;
+
+// ── Trend buffers (60 s history, one point per inference) ────────────────────
+const TREND_LEN    = 60;
+const hrTrendBuf   = new Float32Array(TREND_LEN);
+const spo2TrendBuf = new Float32Array(TREND_LEN);
+let   trendWriteIdx = 0;
+let   trendHasData  = false;
+
+// ── Recording state ───────────────────────────────────────────────────────────
+let recording     = false;
+const recordedData = [];
 
 // Hidden canvases for ROI extraction
 const captureCanvas = document.createElement('canvas');
@@ -97,14 +112,28 @@ function initWorker() {
         console.log('[VitalSense] Inference worker ready.');
         resolve();
       } else if (msg.type === 'result') {
-        latestVitals = { hr_bpm: msg.hr_bpm, spo2: msg.spo2 };
-        console.log(`[VitalSense] HR=${msg.hr_bpm} BPM, SpO2=${msg.spo2}%`);
+        latestVitals = { hr_bpm: msg.hr_bpm, spo2: msg.spo2, snr: msg.snr ?? 0 };
+        console.log(`[VitalSense] HR=${msg.hr_bpm} BPM, SpO2=${msg.spo2}% SNR=${msg.snr}%`);
         if (msg.ppg_wave) {
           for (const v of msg.ppg_wave) {
             ppgBuffer[ppgWriteIdx % PPG_BUFFER_LEN] = v;
             ppgWriteIdx++;
           }
           ppgHasData = true;
+        }
+        // Trend
+        hrTrendBuf[trendWriteIdx % TREND_LEN]   = msg.hr_bpm;
+        spo2TrendBuf[trendWriteIdx % TREND_LEN] = msg.spo2;
+        trendWriteIdx++;
+        trendHasData = true;
+        // Recording
+        if (recording) {
+          recordedData.push({
+            timestamp: new Date().toISOString(),
+            hr:        msg.hr_bpm,
+            spo2:      msg.spo2,
+            quality:   msg.snr ?? 0,
+          });
         }
       } else if (msg.type === 'buffer') {
         bufFilled = msg.filled;
@@ -145,8 +174,10 @@ function resizeOverlay() {
   const panel = overlay.parentElement;
   overlay.width  = panel.clientWidth;
   overlay.height = panel.clientHeight;
-  ppgCanvas.width  = ppgCanvas.clientWidth  * devicePixelRatio;
-  ppgCanvas.height = ppgCanvas.clientHeight * devicePixelRatio;
+  ppgCanvas.width    = ppgCanvas.clientWidth    * devicePixelRatio;
+  ppgCanvas.height   = ppgCanvas.clientHeight   * devicePixelRatio;
+  trendCanvas.width  = trendCanvas.clientWidth  * devicePixelRatio;
+  trendCanvas.height = trendCanvas.clientHeight * devicePixelRatio;
 }
 
 // ── Face Detection ───────────────────────────────────────────────────────────
@@ -271,6 +302,50 @@ function drawPPG() {
   ppgCtx.fillRect(cursorX, 0, dimW, H);
 }
 
+// ── Trend Chart Draw ──────────────────────────────────────────────────────────
+function drawTrend() {
+  const W = trendCanvas.width, H = trendCanvas.height;
+  if (!W || !H) return;
+
+  trendCtx.fillStyle = '#0d0d0d';
+  trendCtx.fillRect(0, 0, W, H);
+  if (!trendHasData) return;
+
+  const HR_MIN = 40, HR_MAX = 180;
+  const SPO2_MIN = 88, SPO2_MAX = 100;
+  const pad = H * 0.08;
+  const writePos = trendWriteIdx % TREND_LEN;
+
+  const toY = (v, vmin, vmax) =>
+    H - pad - ((Math.min(vmax, Math.max(vmin, v)) - vmin) / (vmax - vmin)) * (H - 2 * pad);
+
+  function drawLine(buf, vmin, vmax, color) {
+    trendCtx.strokeStyle = color;
+    trendCtx.lineWidth   = Math.max(1, 1.5 * devicePixelRatio);
+    trendCtx.beginPath();
+    let started = false;
+    for (let i = 0; i < TREND_LEN; i++) {
+      const v = buf[(writePos + i) % TREND_LEN];
+      if (v === 0) { started = false; continue; }
+      const x = (i / (TREND_LEN - 1)) * W;
+      const y = toY(v, vmin, vmax);
+      if (!started) { trendCtx.moveTo(x, y); started = true; }
+      else trendCtx.lineTo(x, y);
+    }
+    trendCtx.stroke();
+  }
+
+  drawLine(hrTrendBuf,   HR_MIN,   HR_MAX,   '#00ff88');
+  drawLine(spo2TrendBuf, SPO2_MIN, SPO2_MAX, '#00ccff');
+
+  const fs = Math.max(9, Math.round(9 * devicePixelRatio));
+  trendCtx.font      = `600 ${fs}px monospace`;
+  trendCtx.fillStyle = 'rgba(0,255,136,0.6)';
+  trendCtx.fillText('HR', 6, fs + 4);
+  trendCtx.fillStyle = 'rgba(0,204,255,0.6)';
+  trendCtx.fillText('SpO\u2082', 6, fs * 2 + 8);
+}
+
 // ── Canvas Overlay ───────────────────────────────────────────────────────────
 function drawOverlay(face) {
   const cw = overlay.width, ch = overlay.height;
@@ -362,6 +437,48 @@ function updateUI(face) {
   spo2Value.textContent = spo2 > 0 ? spo2.toFixed(1) : '--';
   if (spo2 > 0 && spo2 < 95) cardSpo2.classList.add('alert');
   else cardSpo2.classList.remove('alert');
+
+  // Signal quality
+  const snr = latestVitals.snr ?? 0;
+  if (snr > 0) {
+    const label = snr >= 60 ? 'GOOD' : snr >= 30 ? 'FAIR' : 'POOR';
+    qualityValue.textContent = `${snr}% · ${label}`;
+    qualityValue.style.color = snr >= 60 ? 'var(--accent-green)'
+                             : snr >= 30 ? 'var(--accent-amber)'
+                             : 'var(--accent-red)';
+  } else {
+    qualityValue.textContent = '--';
+    qualityValue.style.color = '';
+  }
+}
+
+// ── Recording ────────────────────────────────────────────────────────────────
+function toggleRecording() {
+  if (!recording) {
+    recording = true;
+    recordedData.length = 0;
+    recordBtn.textContent = '\u25A0 STOP';
+    recordBtn.classList.add('recording');
+  } else {
+    recording = false;
+    recordBtn.textContent = '\u25CF REC';
+    recordBtn.classList.remove('recording');
+    if (recordedData.length > 0) downloadCSV();
+  }
+}
+
+function downloadCSV() {
+  const header = 'timestamp,hr_bpm,spo2_pct,signal_quality\n';
+  const rows   = recordedData.map(r =>
+    `${r.timestamp},${r.hr.toFixed(1)},${r.spo2.toFixed(1)},${r.quality}`
+  ).join('\n');
+  const blob = new Blob([header + rows], { type: 'text/csv' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = `vitalsense_${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 // ── Status helper ────────────────────────────────────────────────────────────
@@ -382,6 +499,7 @@ function mainLoop(timestamp) {
   const face = detectFace(timestamp);
   drawOverlay(face);
   drawPPG();
+  drawTrend();
 
   if (face && workerReady) {
     const rgbaData = cropFaceROI(face.bbox);
@@ -407,6 +525,8 @@ setInterval(() => {
   fpsCount = 0;
   fpsLast = now;
 }, 1000);
+
+recordBtn.addEventListener('click', toggleRecording);
 
 // ── Boot ─────────────────────────────────────────────────────────────────────
 init().catch(err => {

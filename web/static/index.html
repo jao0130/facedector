@@ -12,6 +12,7 @@
 
   <header>
     <span id="brand">VITALSENSE</span>
+    <button id="record-btn">&#9679; REC</button>
     <div id="status-group">
       <span id="conn-dot" class="dot disconnected"></span>
       <span id="conn-label">Loading</span>
@@ -42,6 +43,13 @@
         <div class="vital-unit">%</div>
       </div>
 
+      <div id="trend-section">
+        <div class="section-header">
+          <span class="section-label">60s TREND</span>
+        </div>
+        <canvas id="trend-canvas"></canvas>
+      </div>
+
       <div id="buffer-section">
         <div id="buffer-header">
           <span id="buffer-label">SIGNAL BUFFER</span>
@@ -56,6 +64,10 @@
         <div class="info-row">
           <span class="info-key">Detection</span>
           <span class="info-val" id="conf-value">--</span>
+        </div>
+        <div class="info-row">
+          <span class="info-key">Signal Quality</span>
+          <span class="info-val" id="quality-value">--</span>
         </div>
         <div class="info-row">
           <span class="info-key">Pipeline FPS</span>

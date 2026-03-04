@@ -190,11 +190,17 @@ function estimateHR(signal, fs) {
     }
   }
 
-  // Signal-to-noise ratio: peak bin power vs remaining band power (0–100)
-  let totalPower = 0;
-  for (let k = 0; k < K; k++) totalPower += mags[k];
-  const noisePower = Math.max(totalPower - maxMag, 1e-10);
-  const snr = Math.round(Math.min(100, Math.max(0, (maxMag / noisePower - 1) * 25)));
+  // Signal quality: peak power vs mean band power, self-calibrated to bin count
+  // snrRatio=1 → uniform noise (0%), snrRatio=numBins → all power in peak (100%)
+  let totalPower = 0, numBins = 0;
+  for (let k = 0; k < K; k++) {
+    if (mags[k] > 0) { totalPower += mags[k]; numBins++; }
+  }
+  const meanPower = totalPower / Math.max(numBins, 1);
+  const snrRatio  = maxMag / Math.max(meanPower, 1e-10);
+  const snr = Math.round(Math.min(100, Math.max(0,
+    (snrRatio - 1) / Math.max(numBins - 1, 1) * 100
+  )));
 
   return { hr: peakFreq * 60, snr };
 }

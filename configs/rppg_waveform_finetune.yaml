@@ -14,8 +14,7 @@ RPPG_MODEL:
   FPS:       30
   FREQ_LOW:  0.7
   FREQ_HIGH: 2.5
-  SPO2_MIN:   85.0
-  SPO2_RANGE: 15.0
+  SPO2_OFFSET: 80.0
 
   # ── FrequencyAttention 共用（V2 / V3 皆讀取）─────────────────────────────
   FREQ_ATT_POOL_SIZE:       8     # V2: freq_att_pool_size  / V3: pool_size

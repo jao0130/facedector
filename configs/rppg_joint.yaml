@@ -1,0 +1,83 @@
+TASK:                "rppg_joint"
+DEVICE:              "cuda:0"
+NUM_WORKERS:         0
+SEED:                42
+GPU_MEMORY_LIMIT_MB: 13000
+
+RPPG_MODEL:
+  NAME:    "FCAtt_v3"
+  FRAMES:  128
+  FPS:     30
+  INPUT_SIZE:      72
+  FREQ_LOW:        0.7
+  FREQ_HIGH:       2.5
+  FREQ_ATT_POOL_SIZE:       8
+  FREQ_ATT_TEMPORAL_KERNEL: 5
+  FREQ_ATT_SHARPNESS:       10.0
+  NUM_FREQ_BLOCKS:  3
+  SPO2_OFFSET:      80.0
+
+  # 留空則從頭訓練；填入已有 checkpoint 則繼續
+  WEIGHTS: ""
+
+# ── Labeled: MCD-rPPG + UBFC ─────────────────────────────────────────────────
+RPPG_DATA:
+  DATASET:      "MCD-rPPG+UBFC"
+  CACHED_PATH:  ""
+  CACHED_PATHS:
+    - "D:/PreprocessedData_MCD"    # MCD-rPPG: BVP + SpO2 (8000 chunks)
+    - "D:/PreprocessedData_UBFC"   # UBFC: BVP only (SpO2 label = -80, filtered)
+  FS:           30
+  CHUNK_LENGTH: 128
+  LABEL_TYPE:   "DiffNormalized"
+  DATA_TYPE:    "Raw"
+  CROP_FACE:    true
+  LARGE_BOX_COEF: 1.5
+  RESIZE_W:     72
+  RESIZE_H:     72
+  DO_PREPROCESS: false
+
+  # ── Test: PURE (all, never in train/val) ─────────────────────────────────
+  TEST_DATASET:     "PURE"
+  TEST_CACHED_PATH: ""
+  TEST_CACHED_PATHS:
+    - "D:/PreprocessedData"        # PURE: BVP + SpO2 (all subjects)
+
+  # These ratios are unused by create_rppg_joint_dataloaders
+  # (K-fold overrides them), but kept for YACS compatibility
+  TRAIN_BEGIN: 0.0
+  TRAIN_END:   0.8
+  VALID_BEGIN: 0.8
+  VALID_END:   1.0
+
+RPPG_TRAIN:
+  BATCH_SIZE: 6     # labeled batch per step
+  GRAD_CLIP:  1.0
+
+# ── Semi-supervised (Mean Teacher) ───────────────────────────────────────────
+RPPG_SEMI:
+  ENABLED:              true
+  UNLABELED_PATH:       ""
+  UNLABELED_PATHS:
+    - "D:/PreprocessedData_CelebVHQ"  # 20k unlabeled chunks
+  UNLABELED_BATCH_SIZE: 6  # unlabeled batch per step
+  EMA_DECAY:            0.999
+  LAMBDA_UNSUP:         1.0
+  RAMP_UP_EPOCHS:       20     # semi loss ramps up over first 20 epochs
+
+# ── Joint training hyperparameters ───────────────────────────────────────────
+RPPG_JOINT:
+  EPOCHS:             100
+  PATIENCE:            30
+  LR:               1.0e-3
+  GRAD_CLIP:          1.0
+  LAMBDA_SPO2:        1.0    # supervised SpO2 loss weight
+  LAMBDA_HR_SEMI:     1.0    # HR wave consistency (unlabeled)
+  LAMBDA_SPO2_SEMI:   0.5    # SpO2 consistency (unlabeled, after warmup)
+  SPO2_WARMUP_EPOCHS: 30     # epochs before SpO2 semi-loss activates
+  N_FOLDS:            5      # K-fold cross-validation
+  FOLD_IDX:           0      # 0..4; run 5 times for full CV
+
+OUTPUT:
+  CHECKPOINT_DIR: "checkpoints/rppg_joint"
+  LOG_DIR:        "logs/rppg_joint"

@@ -412,6 +412,65 @@ class SpO2Branch(nn.Module):
         return self.pool(self.conv2(self.conv1(x)))  # [B, 16, T, 1, 1]
 
 
+# ── 物理-深度中間融合模組 ────────────────────────────────────────────────────
+
+class SpO2PhysFusion(nn.Module):
+    """
+    多模態中間融合：R/G 物理比值訊號 × 深度形態特徵。
+
+    物理路徑（diff_norm 之前）：
+        rg_ac [B, 2, T] — R、G 通道相對 AC（去直流後除以 DC）
+        → ratio_enc → [B, ratio_mid_ch, T]
+
+    深度路徑（spo2_branch 輸出）：
+        deep_feat [B, deep_ch, T] — freq_blocks 形態特徵
+
+    融合策略：Cross-modal gating
+        gate  = σ(ratio → gate_proj)         ← 物理比值決定「哪些深度特徵重要」
+        fused = deep_feat × gate + ratio_enc  ← 調制 + 殘差注入
+        out   = conv(fused) → [B, out_ch, T]
+
+    輸出維度與 deep_feat 相同（out_ch = deep_ch），
+    使 fusion_head 輸入通道數不變（維持 19ch）。
+    """
+
+    def __init__(self, deep_ch: int = 16, ratio_in_ch: int = 2,
+                 ratio_mid_ch: int = 8, out_ch: int = 16):
+        super().__init__()
+        # 物理比值編碼器：長 kernel 捕捉心跳週期尺度的 R/G 變化
+        self.ratio_enc = nn.Sequential(
+            nn.Conv1d(ratio_in_ch, ratio_mid_ch, kernel_size=7, padding=3),
+            nn.GroupNorm(2, ratio_mid_ch),
+            nn.SiLU(),
+            nn.Conv1d(ratio_mid_ch, ratio_mid_ch, kernel_size=5, padding=2),
+            nn.GroupNorm(2, ratio_mid_ch),
+            nn.SiLU(),
+        )
+        # Gate：由物理特徵生成，調制深度特徵的通道重要性
+        self.gate_proj = nn.Conv1d(ratio_mid_ch, deep_ch, kernel_size=1)
+        # 輸出投影：融合後維度對齊
+        self.out_proj = nn.Sequential(
+            nn.Conv1d(deep_ch + ratio_mid_ch, out_ch, kernel_size=3, padding=1),
+            nn.GroupNorm(4, out_ch),
+            nn.SiLU(),
+        )
+
+    def forward(self, deep_feat: torch.Tensor, rg_ac: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            deep_feat : [B, deep_ch, T]   — spo2_branch 輸出
+            rg_ac     : [B, 2, T]         — R/G 通道相對 AC
+
+        Returns:
+            [B, out_ch, T]
+        """
+        ratio = self.ratio_enc(rg_ac)                              # [B, 8, T]
+        gate  = torch.sigmoid(self.gate_proj(ratio))               # [B, 16, T]
+        gated = deep_feat * gate                                   # 物理比值調制深度特徵
+        fused = torch.cat([gated, ratio], dim=1)                   # [B, 24, T]
+        return self.out_proj(fused)                                 # [B, 16, T]
+
+
 # ── 主模型 ────────────────────────────────────────────────────────────────────
 
 class FCAtt_v3(nn.Module):
@@ -427,7 +486,7 @@ class FCAtt_v3(nn.Module):
                  temporal_kernel_size: int = 3, M: int = 16,
                  freq_low: float = 0.7, freq_high: float = 2.5,
                  sharpness: float = 10.0,
-                 spo2_min: float = 85.0, spo2_range: float = 15.0):
+                 spo2_offset: float = 80.0):
         super().__init__()
 
         if cfg is not None:
@@ -439,12 +498,10 @@ class FCAtt_v3(nn.Module):
             freq_high            = cfg.RPPG_MODEL.FREQ_HIGH
             sharpness            = getattr(cfg.RPPG_MODEL, 'FREQ_ATT_SHARPNESS', 10.0)
             num_freq_blocks      = getattr(cfg.RPPG_MODEL, 'NUM_FREQ_BLOCKS', 3)
-            spo2_min             = cfg.RPPG_MODEL.SPO2_MIN
-            spo2_range           = cfg.RPPG_MODEL.SPO2_RANGE
+            spo2_offset          = getattr(cfg.RPPG_MODEL, 'SPO2_OFFSET', 80.0)
 
-        self.frames     = frames
-        self.spo2_min   = spo2_min
-        self.spo2_range = spo2_range
+        self.frames      = frames
+        self.spo2_offset = spo2_offset  # 顯示用：pred + spo2_offset = 原始 SpO2 %
 
         # ── 0. 差分正規化 ──
         self.diff_norm = DiffNormalizeLayer()
@@ -473,7 +530,14 @@ class FCAtt_v3(nn.Module):
         # ── 4. SpO2 分支 ──
         self.spo2_branch = SpO2Branch(frames=frames)
 
-        # ── 5. SpO2 融合頭：1(rPPG) + 1(VPG) + 1(APG) + 16(SpO2) = 19 ──
+        # ── 4b. 物理-深度中間融合 ──────────────────────────────────────────────
+        # 物理路徑（diff_norm 之前）：R/G 通道 AC/DC 比值 [B, 2, T]
+        # 深度路徑（spo2_branch）  ：freq_blocks 形態特徵  [B, 16, T]
+        # 兩者在中間融合，讓物理比值調制深度特徵後，輸出仍維持 16ch
+        # → fusion_head 回到 19ch，與 checkpoint 相容
+        self.spo2_phys_fusion = SpO2PhysFusion(deep_ch=16, ratio_in_ch=2, ratio_mid_ch=8, out_ch=16)
+
+        # ── 5. SpO2 融合頭：1(rPPG) + 1(VPG) + 1(APG) + 16(fused) = 19 ──
         self.spo2_fusion_head = nn.Sequential(
             nn.Conv1d(19, 32, kernel_size=3, padding=1),
             nn.GroupNorm(8, 32),
@@ -487,29 +551,38 @@ class FCAtt_v3(nn.Module):
             nn.AdaptiveAvgPool1d(1),
             nn.Flatten(),
             nn.Linear(32, 1),
-            nn.Sigmoid(),
         )
 
     def forward(self, x: torch.Tensor,
                 x2: torch.Tensor = None) -> tuple[torch.Tensor, torch.Tensor]:
         B, C, T, H, W = x.shape
 
-        # 0. 差分正規化
-        x = self.diff_norm(x)                       # [B, 3, T, H, W]
+        # ── 物理路徑（在 DiffNormalize 之前分叉）────────────────────────────
+        # 每通道空間平均 → 1D 時序信號 [B, 3, T]，保留 DC 資訊
+        chan_signal = x.mean(dim=(3, 4))                             # [B, 3, T]
+        # DC：時序平均亮度 [B, 3, 1]（clamp 防 dark pixel 除零）
+        dc = chan_signal.mean(dim=-1, keepdim=True).clamp(min=1.0)
+        # 相對 AC：去直流後除以 DC，量綱統一、保留通道間比值關係
+        ac = (chan_signal - dc) / dc                                 # [B, 3, T]
+        # R、G 通道相對 AC，傳入 SpO2PhysFusion 做中間融合
+        rg_ac = ac[:, :2, :]                                         # [B, 2, T]
+
+        # 0. 差分正規化（此後 DC 資訊消失，HR 路徑不需要）
+        x = self.diff_norm(x)                                        # [B, 3, T, H, W]
 
         # 1. 空間升維
-        x = self.stem(x)                            # [B, 64, T, H/4, W/4]
+        x = self.stem(x)                                             # [B, 64, T, H/4, W/4]
 
         # 2. 頻域注意力主幹
         for block in self.freq_blocks:
-            x = block(x)                            # [B, 64, T, H/4, W/4]
+            x = block(x)                                             # [B, 64, T, H/4, W/4]
 
         # 3. HR 分支
-        rppg_feat = self.hr_branch(x)               # [B, 1, T, 1, 1]
-        rppg_wave = rppg_feat.view(B, T)            # [B, T]
+        rppg_feat = self.hr_branch(x)                                # [B, 1, T, 1, 1]
+        rppg_wave = rppg_feat.view(B, T)                             # [B, T]
 
-        # 4. SpO2 分支
-        spo2_feat = self.spo2_branch(x)             # [B, 16, T, 1, 1]
+        # 4. SpO2 分支（從 freq_blocks 特徵提取輔助 SpO2 特徵）
+        spo2_feat = self.spo2_branch(x)                              # [B, 16, T, 1, 1]
 
         # 5. VPG / APG
         rppg_1d = rppg_wave.unsqueeze(1)
@@ -517,9 +590,11 @@ class FCAtt_v3(nn.Module):
         apg = F.pad(torch.diff(vpg,     n=1, dim=-1), (0, 1), mode='replicate')
 
         # 6. SpO2 融合
-        spo2_1d   = spo2_feat.view(B, 16, T)
-        fused     = torch.cat([rppg_1d, vpg, apg, spo2_1d], dim=1)  # [B, 19, T]
-        spo2_pred = self.spo2_fusion_head(fused)                     # [B, 1]
-        spo2_pred = spo2_pred * self.spo2_range + self.spo2_min
+        # 中間融合：物理比值特徵調制深度特徵 → [B, 16, T]
+        spo2_1d     = spo2_feat.view(B, 16, T)
+        spo2_fused  = self.spo2_phys_fusion(spo2_1d, rg_ac)      # [B, 16, T]
+        # 最終融合：[1(rPPG), 1(VPG), 1(APG), 16(fused)] = 19ch
+        fused       = torch.cat([rppg_1d, vpg, apg, spo2_fused], dim=1)  # [B, 19, T]
+        spo2_pred   = self.spo2_fusion_head(fused)                        # [B, 1]
 
         return rppg_wave, spo2_pred

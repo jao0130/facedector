@@ -42,8 +42,7 @@ _C.RPPG_MODEL.FREQ_ATT_SHARPNESS = 10.0
 _C.RPPG_MODEL.NUM_FREQ_BLOCKS = 3
 _C.RPPG_MODEL.FREQ_LOW = 0.7
 _C.RPPG_MODEL.FREQ_HIGH = 2.5
-_C.RPPG_MODEL.SPO2_MIN = 85.0
-_C.RPPG_MODEL.SPO2_RANGE = 15.0
+_C.RPPG_MODEL.SPO2_OFFSET = 80.0
 _C.RPPG_MODEL.WEIGHTS = ""
 
 # ── Face Detection Data ──
@@ -156,11 +155,25 @@ _C.RPPG_SPO2_FINETUNE = CN()
 _C.RPPG_SPO2_FINETUNE.EPOCHS               = 60
 _C.RPPG_SPO2_FINETUNE.PATIENCE             = 15
 _C.RPPG_SPO2_FINETUNE.LR                   = 2e-5
-_C.RPPG_SPO2_FINETUNE.LAMBDA_SPECTRAL      = 3.0
-_C.RPPG_SPO2_FINETUNE.LAMBDA_SPO2          = 10.0
-_C.RPPG_SPO2_FINETUNE.LAMBDA_UNSUP         = 1.0   # 無 SpO2 標籤樣本的 rPPG loss 權重
-_C.RPPG_SPO2_FINETUNE.UNLABELED_PATH       = ""    # BVP-only 資料目錄（UBFC-Phys）
-_C.RPPG_SPO2_FINETUNE.UNLABELED_BATCH_SIZE = 8
+_C.RPPG_SPO2_FINETUNE.LAMBDA_SPO2          = 1.0
+_C.RPPG_SPO2_FINETUNE.LAMBDA_CONSIST       = 0.5   # 一致性正規化係數
+_C.RPPG_SPO2_FINETUNE.LAMBDA_DIV           = 1.0   # Diversity loss 係數
+_C.RPPG_SPO2_FINETUNE.PURE_PATH            = ""    # PURE 預處理目錄（按受試者切分）
+_C.RPPG_SPO2_FINETUNE.PURE_TRAIN_SUBJECTS  = []    # e.g. ["01","02",...,"08"]
+_C.RPPG_SPO2_FINETUNE.PURE_TEST_SUBJECTS   = []    # e.g. ["09","10"]
+
+# ── Joint Multi-task Semi-supervised Training ──
+_C.RPPG_JOINT = CN()
+_C.RPPG_JOINT.EPOCHS             = 100
+_C.RPPG_JOINT.PATIENCE           = 30
+_C.RPPG_JOINT.LR                 = 1e-3
+_C.RPPG_JOINT.GRAD_CLIP          = 1.0
+_C.RPPG_JOINT.LAMBDA_SPO2        = 1.0    # supervised SpO2 loss weight
+_C.RPPG_JOINT.LAMBDA_HR_SEMI     = 1.0    # HR wave consistency weight
+_C.RPPG_JOINT.LAMBDA_SPO2_SEMI   = 0.5    # SpO2 consistency weight
+_C.RPPG_JOINT.SPO2_WARMUP_EPOCHS = 30     # epochs before SpO2 semi-loss activates
+_C.RPPG_JOINT.N_FOLDS            = 5      # K-fold cross-validation
+_C.RPPG_JOINT.FOLD_IDX           = 0      # which fold is held out for validation
 
 # ── Inference ──
 _C.INFERENCE = CN()

@@ -117,21 +117,51 @@ def main():
         _run_all_tests(trainer, data_loaders)
 
     elif cfg.TASK == "rppg_spo2_finetune":
-        from data.dataset_rppg import create_rppg_dataloaders
+        from data.dataset_rppg import create_rppg_spo2_dataloaders
         from trainers.rppg_spo2_finetune_trainer import rPPGSpO2FinetuneTrainer
 
-        # MCD-rPPG (BVP + SpO2) → train/valid
-        # PURE (BVP + SpO2)     → test
-        data_loaders = create_rppg_dataloaders(cfg)
+        # MCD-rPPG (BVP + SpO2) → train (0.0-0.8) / val (0.8-1.0)
+        # PURE subjects 01-10   → test only
+        data_loaders = create_rppg_spo2_dataloaders(cfg)
         trainer = rPPGSpO2FinetuneTrainer(cfg)
 
         history = trainer.train(data_loaders)
         print(f"\n[Done] SpO2 fine-tune complete.")
         _run_all_tests(trainer, data_loaders)
 
+    elif cfg.TASK == "rppg_joint":
+        from data.dataset_rppg import create_rppg_joint_dataloaders
+        from trainers.rppg_joint_trainer import rPPGJointTrainer
+        import torch
+
+        data_loaders = create_rppg_joint_dataloaders(cfg)
+        trainer = rPPGJointTrainer(cfg)
+
+        if args.test:
+            ckpt_path = args.checkpoint
+            if ckpt_path is None:
+                # Default to best checkpoint in configured output dir
+                import glob as _glob
+                pattern = os.path.join(cfg.OUTPUT.CHECKPOINT_DIR, "*joint_best*.pth")
+                found   = sorted(_glob.glob(pattern))
+                ckpt_path = found[-1] if found else None
+            if not ckpt_path or not os.path.isfile(ckpt_path):
+                print(f"[Error] Checkpoint not found: {ckpt_path}")
+                sys.exit(1)
+            ckpt  = torch.load(ckpt_path, map_location=cfg.DEVICE, weights_only=False)
+            state = ckpt.get('model_state_dict', ckpt)
+            trainer.student.load_state_dict(state, strict=False)
+            print(f"[Test] Loaded: {ckpt_path}")
+            _run_all_tests(trainer, data_loaders)
+        else:
+            history = trainer.train(data_loaders)
+            print(f"\n[Done] Joint multi-task semi-supervised training complete.")
+            _run_all_tests(trainer, data_loaders)
+
     else:
         print(f"[Error] Unknown task: {cfg.TASK}. "
-              f"Use 'face_detection', 'rppg', 'rppg_semi', 'rppg_finetune', or 'rppg_spo2_finetune'.")
+              f"Use 'face_detection', 'rppg', 'rppg_semi', 'rppg_finetune', "
+              f"'rppg_spo2_finetune', or 'rppg_joint'.")
         sys.exit(1)
 
 

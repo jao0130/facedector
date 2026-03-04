@@ -39,6 +39,38 @@ class NegPearsonLoss(nn.Module):
         return loss / preds.shape[0]
 
 
+class NegPearsonScalarLoss(nn.Module):
+    """
+    Negative Pearson loss for scalar targets (e.g. SpO2).
+
+    Computes Pearson r across the batch dimension (not time dimension).
+    Loss = 1 - r, range [0, 2].
+
+    Note: requires B ≥ 2 and non-constant target.
+    Returns 0.0 (no gradient) when target is constant to avoid NaN.
+    """
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # 使用 centered 公式避免 SpO2 值域 [85,100] 的災難性消去：
+        #   N*sum_xy - sum_x*sum_y 在大均值 + 小方差時，兩大數相減
+        #   float32 精度不足 → var 出現負值 → sqrt(負) = NaN
+        p = pred.view(-1)
+        t = target.view(-1)
+
+        t_c  = t - t.mean()
+        t_var = (t_c ** 2).sum()
+
+        # target 為常數時 r 無定義，回傳 1.0 且梯度為 0
+        if t_var.item() < 1e-6:
+            return pred.mean() * 0.0 + 1.0
+
+        p_c = p - p.mean()
+        r   = (p_c * t_c).sum() / (
+              p_c.norm() * t_c.norm() + 1e-8)
+        r   = r.clamp(-1.0, 1.0)
+        return 1.0 - r
+
+
 class WeightedMSELoss(nn.Module):
     """
     SpO2 loss: MSE weighted by (100 - mean_label)^2.

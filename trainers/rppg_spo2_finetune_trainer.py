@@ -36,6 +36,7 @@ import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
 
+from losses import NegPearsonScalarLoss
 from .base_trainer import BaseTrainer, make_rppg_ckpt_name
 
 
@@ -82,11 +83,49 @@ class rPPGSpO2FinetuneTrainer(BaseTrainer):
         frozen    = total - trainable
         print(f"[SpO2Finetune] Trainable : {trainable:,}  ({trainable/total*100:.1f}%)")
         print(f"[SpO2Finetune] Frozen    : {frozen:,}  (stem + freq_blocks + hr_branch)")
-        print(f"[SpO2Finetune] Training  : spo2_branch + spo2_fusion_head")
+        print(f"[SpO2Finetune] Training  : spo2_branch + spo2_fusion_head + ratio_refiner")
 
         ft = cfg.RPPG_SPO2_FINETUNE
-        self.lambda_spo2 = ft.LAMBDA_SPO2
-        self.grad_clip   = cfg.RPPG_TRAIN.GRAD_CLIP
+        self.lambda_consist  = getattr(ft, 'LAMBDA_CONSIST', 0.5)
+        self.lambda_div      = getattr(ft, 'LAMBDA_DIV',     1.0)
+        self.grad_clip       = cfg.RPPG_TRAIN.GRAD_CLIP
+        self.neg_pearson     = NegPearsonScalarLoss()
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _batch_pearson(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Pearson r over a batch [B, 1] → scalar tensor."""
+        p = pred.view(-1) - pred.mean()
+        t = target.view(-1) - target.mean()
+        r = (p * t).sum() / (
+            p.pow(2).sum().sqrt() * t.pow(2).sum().sqrt() + 1e-8)
+        return r
+
+    @staticmethod
+    def _augment_video(video: torch.Tensor) -> torch.Tensor:
+        """
+        SpO2-safe augmentation: 不改變血氧生理特徵，僅干擾像素細節。
+
+        SpO2 由 R/IR 光吸收比估計，對輕微亮度/對比度變化不敏感。
+        加入這些擾動後，模型若仍預測一致，代表學到真實特徵而非 artifact。
+
+        Input/output: [B, C, T, H, W] float32, range [0, 255]
+        """
+        B = video.shape[0]
+        # 亮度縮放 [0.90, 1.10]：per-sample 整體乘法，保留 R/G/B 通道比值
+        brightness = 0.90 + 0.20 * torch.rand(B, 1, 1, 1, 1, device=video.device)
+        aug = video * brightness
+
+        # 對比度縮放：per-channel 均值為中心，不改變通道間相對強度
+        # SpO2 依賴 R/G 比值，必須 per-channel 計算中心點
+        contrast  = 0.90 + 0.20 * torch.rand(B, 1, 1, 1, 1, device=video.device)
+        chan_mean  = aug.mean(dim=(2, 3, 4), keepdim=True)   # [B, C, 1, 1, 1]
+        aug = (aug - chan_mean) * contrast + chan_mean
+
+        # 高斯雜訊 σ=3（[0,255] 約 1.2%）
+        aug = aug + torch.randn_like(aug) * 3.0
+        return aug.clamp(0.0, 255.0)
 
     # ── Training loop ─────────────────────────────────────────────────────────
 
@@ -104,16 +143,17 @@ class rPPGSpO2FinetuneTrainer(BaseTrainer):
         )
         sched = CosineAnnealingLR(opt, T_max=total_epochs, eta_min=ft.LR * 0.1)
 
-        best_val         = float('inf')
-        patience_counter = 0
-        history = {'loss_spo2': [], 'val_loss': []}
+        best_r            = -float('inf')   # maximize val_r（主要指標）
+        best_mae          =  float('inf')   # minimize val_mae（r=NaN 時備用）
+        patience_counter  = 0
+        history = {'loss_spo2': [], 'val_r': []}
 
         csv_name = make_rppg_ckpt_name(self.cfg, tag="spo2ft_log").replace(".pth", ".csv")
         csv_path = os.path.join(self.cfg.OUTPUT.LOG_DIR, csv_name)
         os.makedirs(self.cfg.OUTPUT.LOG_DIR, exist_ok=True)
         csv_file   = open(csv_path, 'w', newline='')
         csv_writer = csv.writer(csv_file)
-        csv_writer.writerow(['epoch', 'loss_spo2', 'val_loss', 'best'])
+        csv_writer.writerow(['epoch', 'loss_spo2', 'val_mae', 'val_r', 'best'])
         csv_file.flush()
 
         for epoch in range(total_epochs):
@@ -130,24 +170,48 @@ class rPPGSpO2FinetuneTrainer(BaseTrainer):
                 video      = video.to(self.device)
                 spo2_label = spo2_label.to(self.device)   # [B, 1]
 
+                # ── 監督 loss（原始影片）────────────────────────────────────
                 _, pred_spo2 = self.model(video)
 
-                # SpO2 MSE + MAE（hr_branch 凍結，L_spo2 梯度只流向 spo2 分支）
-                loss_spo2 = (F.mse_loss(pred_spo2, spo2_label)
-                             + 0.5 * F.l1_loss(pred_spo2, spo2_label))
+                # MSE（主要）+ MAE（抑制離群值）
+                # 不用 NegPearson 作 training loss：batch=8 + SpO2 窄範圍 (σ≈0.95%)
+                # → batch Pearson r 信賴區間極寬 → 梯度方向為隨機雜訊 → r 越訓練越低
+                loss_mse = F.mse_loss(pred_spo2, spo2_label)
+                loss_mae = F.l1_loss(pred_spo2, spo2_label)
+                loss_sup = loss_mse + 0.5 * loss_mae
+
+                # batch_r 僅監控（不加入梯度）
+                batch_r = self._batch_pearson(pred_spo2.detach(), spo2_label)
+
+                # ── 一致性：擾動影片仍對標籤負責（MSE 穩定）────────────
+                _, pred_spo2_aug = self.model(self._augment_video(video))
+                loss_consist = (F.mse_loss(pred_spo2_aug, spo2_label)
+                                + 0.5 * F.l1_loss(pred_spo2_aug, spo2_label))
+
+                # ── Diversity：防止 collapse（std(pred) < 1.0% 才觸發）─
+                # 原閾值 0.3 過低，batch 均值擾動就能繞過；提高至 1.0
+                loss_div = F.relu(1.0 - pred_spo2.std())
+
+                loss_total = (loss_sup
+                              + self.lambda_consist * loss_consist
+                              + self.lambda_div     * loss_div)
 
                 opt.zero_grad()
-                loss_spo2.backward()
+                loss_total.backward()
                 nn.utils.clip_grad_norm_(
                     [p for p in self.model.parameters() if p.requires_grad],
                     self.grad_clip,
                 )
                 opt.step()
 
-                sum_spo2 += loss_spo2.item()
+                sum_spo2 += loss_total.item()
                 n_steps  += 1
 
-                pbar.set_postfix(spo2=f"{loss_spo2.item():.4f}")
+                pbar.set_postfix(
+                    mse=f"{loss_mse.item():.3f}",
+                    div=f"{loss_div.item():.3f}",
+                    r=f"{batch_r.item():.3f}",
+                )
 
             sched.step()
 
@@ -156,35 +220,53 @@ class rPPGSpO2FinetuneTrainer(BaseTrainer):
 
             # ── Validation ────────────────────────────────────────────────────
             is_best  = False
-            val_loss = float('nan')
+            val_mae  = float('nan')
+            val_r    = float('nan')
             if valid_loader:
-                val_loss = self._validate(valid_loader)
-                history['val_loss'].append(val_loss)
-                print(f"  Epoch {epoch+1:3d} | spo2: {avg_spo2:.4f} | Val: {val_loss:.4f}")
+                val_mae, val_r = self._validate(valid_loader)
+                r_valid = not (val_r != val_r)   # True when val_r is not NaN
 
-                if val_loss < best_val:
-                    best_val         = val_loss
+                history['val_r'].append(val_r if r_valid else float('nan'))
+                r_disp = f"{val_r:.4f}" if r_valid else "NaN"
+                print(f"  Epoch {epoch+1:3d} | loss: {avg_spo2:.4f} | "
+                      f"Val MAE: {val_mae:.3f}%  r: {r_disp}")
+
+                # r 有效時以 r 為主（越高越好），各自與各自的 best 比較
+                # 避免 r 和 MAE 跨量級混比（例如 r=0.4 vs -MAE=-0.5 比較無意義）
+                if r_valid:
+                    improved = val_r > best_r
+                    if improved:
+                        best_r = val_r
+                else:
+                    improved = val_mae < best_mae
+                    if improved:
+                        best_mae = val_mae
+
+                if improved:
                     patience_counter = 0
                     is_best          = True
                     ckpt_name = make_rppg_ckpt_name(self.cfg, tag="spo2ft_best")
                     path = os.path.join(self.cfg.OUTPUT.CHECKPOINT_DIR, ckpt_name)
                     os.makedirs(self.cfg.OUTPUT.CHECKPOINT_DIR, exist_ok=True)
                     self.save_checkpoint(self.model, opt, epoch, path,
-                                         val_loss=val_loss)
-                    print(f"  -> Saved: {ckpt_name}")
+                                         val_loss=val_mae)
+                    metric_str = f"r={val_r:.4f}" if r_valid else f"MAE={val_mae:.3f}%"
+                    print(f"  -> Best {metric_str}  Saved: {ckpt_name}")
                 else:
                     patience_counter += 1
                     if patience_counter >= patience:
                         csv_writer.writerow([epoch+1, f"{avg_spo2:.4f}",
-                                             f"{val_loss:.4f}", ''])
+                                             f"{val_mae:.4f}",
+                                             r_disp, ''])
                         csv_file.flush()
                         print(f"  Early stopping at epoch {epoch+1}")
                         break
             else:
-                print(f"  Epoch {epoch+1:3d} | spo2: {avg_spo2:.4f}")
+                print(f"  Epoch {epoch+1:3d} | loss: {avg_spo2:.4f}")
 
             csv_writer.writerow([epoch+1, f"{avg_spo2:.4f}",
-                                  f"{val_loss:.4f}", '*' if is_best else ''])
+                                  f"{val_mae:.4f}", f"{val_r:.4f}",
+                                  '*' if is_best else ''])
             csv_file.flush()
 
         csv_file.close()
@@ -193,22 +275,44 @@ class rPPGSpO2FinetuneTrainer(BaseTrainer):
         self.save_history(history, os.path.join(self.cfg.OUTPUT.LOG_DIR, history_name))
         return history
 
-    # ── Validation：SpO2 MAE ──────────────────────────────────────────────────
+    # ── Validation：SpO2 MAE + r ──────────────────────────────────────────────
 
     @torch.no_grad()
-    def _validate(self, loader) -> float:
-        self.model.eval()
-        total = 0.0
-        for video, _, spo2_label in loader:
-            video      = video.to(self.device)
-            spo2_label = spo2_label.to(self.device)
-            _, pred_spo2 = self.model(video)
-            total += F.l1_loss(pred_spo2, spo2_label).item()
-        self.model.train()
-        return total / max(len(loader), 1)
+    def _validate(self, loader):
+        """Returns (mae, pearson_r). Early stopping targets maximum r."""
+        from scipy.stats import pearsonr as scipy_pearsonr
+        import numpy as np
 
-    def validate(self, data_loader) -> float:
-        return self._validate(data_loader)
+        self.model.eval()
+        all_preds = []
+        all_gts   = []
+
+        for video, _, spo2_label in loader:
+            video = video.to(self.device)
+            _, pred_spo2 = self.model(video)
+            all_preds.append(pred_spo2.cpu().numpy())
+            all_gts.append(spo2_label.numpy())
+
+        self.model.train()
+
+        preds = np.concatenate(all_preds).ravel()
+        gts   = np.concatenate(all_gts).ravel()
+
+        # filter spo2=0 fallback values (label is spo2 - 80, so threshold is -30)
+        mask  = gts > -30.0
+        preds, gts = preds[mask], gts[mask]
+
+        mae = float(np.mean(np.abs(preds - gts))) if len(gts) else float('nan')
+        try:
+            r = float(scipy_pearsonr(preds, gts)[0]) if len(gts) > 1 else float('nan')
+        except ValueError:
+            # target 為常數時（MCD-rPPG SpO2 窄範圍可能發生），r 無定義
+            r = float('nan')
+        return mae, r
+
+    def validate(self, data_loader):
+        mae, r = self._validate(data_loader)
+        return mae
 
     # ── Test：HR（PPG 凍結，驗證不受影響）+ SpO2 ─────────────────────────────
 
@@ -245,7 +349,7 @@ class rPPGSpO2FinetuneTrainer(BaseTrainer):
                     hr_gts.append(estimate_hr_fft(g_wave,  self.cfg.RPPG_MODEL.FPS))
 
                     spo2_val = float(spo2_label[i].item())
-                    if spo2_val > 50.0:
+                    if spo2_val > -30.0:
                         spo2_preds.append(float(pred_spo2[i].item()))
                         spo2_gts.append(spo2_val)
 

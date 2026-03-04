@@ -74,7 +74,7 @@ class rPPGVideoDataset(Dataset):
             spo2 = float(np.mean(spo2))
         else:
             spo2 = 0.0
-        spo2_tensor = torch.tensor([spo2], dtype=torch.float32)
+        spo2_tensor = torch.tensor([spo2 - 80.0], dtype=torch.float32)
 
         return video_tensor, bvp_tensor, spo2_tensor
 
@@ -256,6 +256,200 @@ def create_rppg_dataloaders(cfg) -> Dict[str, DataLoader]:
             loaders[key] = loader
             if 'test' not in loaders:
                 loaders['test'] = loader
+
+    return loaders
+
+
+def _filter_by_subject(file_list: List[str], subject_ids: List[str]) -> List[str]:
+    """
+    Keep only files whose session name starts with one of the given subject IDs.
+
+    PURE naming: '01-01_chunk000' → subject '01' (digits before first '-')
+    Files not matching the expected pattern are silently skipped.
+    """
+    import re
+    sid_set = set(subject_ids)
+    result  = []
+    for f in file_list:
+        m = re.match(r'^(\d+)-', os.path.basename(f))
+        if not m:
+            continue   # 非 PURE 格式（如 MCD-rPPG），跳過
+        if m.group(1) in sid_set:
+            result.append(f)
+    return result
+
+
+def create_rppg_spo2_dataloaders(cfg) -> Dict[str, DataLoader]:
+    """
+    Factory for SpO2 fine-tune (Stage-3).
+
+    Train : MCD-rPPG sessions 0.0–0.8  +  PURE subjects in PURE_TRAIN_SUBJECTS
+    Val   : MCD-rPPG sessions 0.8–1.0  (SpO2 MAE 監控)
+    Test  : PURE subjects in PURE_TEST_SUBJECTS
+    """
+    ft = cfg.RPPG_SPO2_FINETUNE
+    bs = cfg.RPPG_TRAIN.BATCH_SIZE
+
+    # ── MCD-rPPG: session-based train/val ─────────────────────────────────────
+    cached_paths = []
+    if cfg.RPPG_DATA.CACHED_PATH:
+        cached_paths.append(cfg.RPPG_DATA.CACHED_PATH)
+    cached_paths.extend(cfg.RPPG_DATA.CACHED_PATHS)
+
+    mcd_files   = _discover_npy_files(cached_paths)
+    train_files = _split_by_session(mcd_files, cfg.RPPG_DATA.TRAIN_BEGIN, cfg.RPPG_DATA.TRAIN_END)
+    valid_files = _split_by_session(mcd_files, cfg.RPPG_DATA.VALID_BEGIN, cfg.RPPG_DATA.VALID_END)
+    print(f"[SpO2 Data] MCD-rPPG — train: {len(train_files)}, val: {len(valid_files)} chunks")
+
+    # ── PURE: subject-based split ─────────────────────────────────────────────
+    pure_path          = getattr(ft, 'PURE_PATH', '')
+    pure_train_subjects = list(getattr(ft, 'PURE_TRAIN_SUBJECTS', []))
+    pure_test_subjects  = list(getattr(ft, 'PURE_TEST_SUBJECTS',  []))
+    pure_test_files = []
+
+    if pure_path and os.path.isdir(pure_path):
+        pure_all = _discover_npy_files(pure_path)
+
+        if pure_train_subjects:
+            pure_train = _filter_by_subject(pure_all, pure_train_subjects)
+            train_files = train_files + pure_train
+            print(f"[SpO2 Data] PURE train (subj {pure_train_subjects}): {len(pure_train)} chunks")
+
+        if pure_test_subjects:
+            pure_test_files = _filter_by_subject(pure_all, pure_test_subjects)
+            print(f"[SpO2 Data] PURE test  (subj {pure_test_subjects}): {len(pure_test_files)} chunks")
+    else:
+        if pure_path:
+            print(f"[SpO2 Data] WARNING: PURE_PATH not found: {pure_path}")
+
+    print(f"[SpO2 Data] Total — train: {len(train_files)}, val: {len(valid_files)}")
+
+    loaders: Dict[str, DataLoader] = {}
+
+    if train_files:
+        loaders['train'] = DataLoader(
+            rPPGVideoDataset(train_files, cfg),
+            batch_size=bs, shuffle=True,
+            num_workers=cfg.NUM_WORKERS, pin_memory=True, drop_last=True,
+        )
+    if valid_files:
+        loaders['valid'] = DataLoader(
+            rPPGVideoDataset(valid_files, cfg),
+            batch_size=bs, shuffle=False,
+            num_workers=cfg.NUM_WORKERS, pin_memory=True,
+        )
+    if pure_test_files:
+        test_ds = rPPGVideoDataset(pure_test_files, cfg)
+        test_loader = DataLoader(
+            test_ds, batch_size=bs, shuffle=False,
+            num_workers=cfg.NUM_WORKERS, pin_memory=True,
+        )
+        loaders['test']      = test_loader
+        loaders['test_PURE'] = test_loader
+
+    return loaders
+
+
+def create_rppg_joint_dataloaders(cfg) -> Dict[str, DataLoader]:
+    """
+    Factory for joint multi-task semi-supervised training.
+
+    Labeled  : MCD-rPPG + UBFC  (CACHED_PATHS)  — K-fold train/val split
+    Test     : PURE              (TEST_CACHED_PATHS) — all chunks, not in training
+    Unlabeled: CelebV-HQ        (RPPG_SEMI.UNLABELED_PATHS)
+
+    K-fold strategy:
+        All labeled sessions are sorted, divided into N_FOLDS equal parts.
+        Fold FOLD_IDX is held out as validation; the rest form the training set.
+        This ensures no session leakage while enabling full K-fold CV.
+    """
+    jt       = cfg.RPPG_JOINT
+    n_folds  = getattr(jt, 'N_FOLDS',   5)
+    fold_idx = getattr(jt, 'FOLD_IDX',  0)
+    bs       = cfg.RPPG_TRAIN.BATCH_SIZE
+
+    # ── Labeled data ──────────────────────────────────────────────────────────
+    labeled_paths = []
+    if cfg.RPPG_DATA.CACHED_PATH:
+        labeled_paths.append(cfg.RPPG_DATA.CACHED_PATH)
+    labeled_paths.extend(cfg.RPPG_DATA.CACHED_PATHS)
+
+    all_labeled = _discover_npy_files(labeled_paths)
+    print(f"[Joint Data] Labeled: {len(all_labeled)} chunks "
+          f"from {len(labeled_paths)} source(s)")
+
+    # K-fold split — _split_by_session handles [begin, end) by ratio
+    fold_w   = 1.0 / n_folds
+    v_begin  = fold_idx * fold_w
+    v_end    = (fold_idx + 1) * fold_w
+
+    train_files = (
+        _split_by_session(all_labeled, 0.0, v_begin) +
+        _split_by_session(all_labeled, v_end,  1.0)
+    )
+    valid_files = _split_by_session(all_labeled, v_begin, v_end)
+    print(f"[Joint Data] Fold {fold_idx}/{n_folds} — "
+          f"train: {len(train_files)}, val: {len(valid_files)}")
+
+    # ── Test: PURE (independent, never in train/val) ──────────────────────────
+    test_paths: List[str] = []
+    if cfg.RPPG_DATA.TEST_CACHED_PATH:
+        test_paths.append(cfg.RPPG_DATA.TEST_CACHED_PATH)
+    test_paths.extend(getattr(cfg.RPPG_DATA, 'TEST_CACHED_PATHS', []))
+
+    # ── Unlabeled: CelebV-HQ ─────────────────────────────────────────────────
+    unlabeled_paths: List[str] = []
+    if cfg.RPPG_SEMI.UNLABELED_PATH:
+        unlabeled_paths.append(cfg.RPPG_SEMI.UNLABELED_PATH)
+    unlabeled_paths.extend(cfg.RPPG_SEMI.UNLABELED_PATHS)
+
+    loaders: Dict[str, DataLoader] = {}
+
+    if train_files:
+        loaders['train'] = DataLoader(
+            rPPGVideoDataset(train_files, cfg),
+            batch_size=bs, shuffle=True,
+            num_workers=cfg.NUM_WORKERS, pin_memory=True, drop_last=True,
+        )
+    if valid_files:
+        loaders['valid'] = DataLoader(
+            rPPGVideoDataset(valid_files, cfg),
+            batch_size=bs, shuffle=False,
+            num_workers=cfg.NUM_WORKERS, pin_memory=True,
+        )
+
+    for path in test_paths:
+        if not path or not os.path.isdir(path):
+            continue
+        files = _discover_npy_files(path)
+        if not files:
+            continue
+        name = (os.path.basename(path.rstrip('/\\'))
+                .replace('PreprocessedData_', '')
+                .replace('PreprocessedData', 'test'))
+        print(f"[Joint Data] Test ({name}): {len(files)} chunks")
+        loader = DataLoader(
+            rPPGVideoDataset(files, cfg),
+            batch_size=bs, shuffle=False,
+            num_workers=cfg.NUM_WORKERS, pin_memory=True,
+        )
+        loaders[f'test_{name}'] = loader
+        if 'test' not in loaders:
+            loaders['test'] = loader
+
+    if unlabeled_paths:
+        unlab_files = _discover_npy_files(unlabeled_paths)
+        print(f"[Joint Data] Unlabeled: {len(unlab_files)} chunks "
+              f"from {len(unlabeled_paths)} source(s)")
+        if unlab_files:
+            loaders['unlabeled'] = DataLoader(
+                rPPGUnlabeledDataset(unlab_files, cfg),
+                batch_size=cfg.RPPG_SEMI.UNLABELED_BATCH_SIZE,
+                shuffle=True,
+                num_workers=cfg.NUM_WORKERS, pin_memory=False, drop_last=True,
+            )
+    else:
+        print("[Joint Data] WARNING: No unlabeled data paths configured")
 
     return loaders
 

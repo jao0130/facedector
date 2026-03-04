@@ -10,24 +10,21 @@ RPPG_MODEL:
   FPS:       30
   FREQ_LOW:  0.7
   FREQ_HIGH: 2.5
-  SPO2_MIN:   85.0
-  SPO2_RANGE: 15.0
+  SPO2_OFFSET: 80.0
   FREQ_ATT_POOL_SIZE:       8
   FREQ_ATT_TEMPORAL_KERNEL: 5
   FREQ_ATT_SHARPNESS:       10.0
   NUM_FREQ_BLOCKS: 3
   INPUT_SIZE:      72
 
-  # 從 waveform fine-tune checkpoint 出發
   WEIGHTS: "checkpoints/rppg_finetune_v3/rppg_fcatt_v3_128f_72px_finetune_best.pth"
 
 RPPG_DATA:
-  # 有標籤訓練集：BVP + SpO2 完整標籤
   DATASET:      "MCD-rPPG"
   DATA_PATH:    ""
   CACHED_PATH:  ""
   CACHED_PATHS:
-    - "D:/PreprocessedData_MCD"      # MCD-rPPG: BVP + SpO2 (supervised)
+    - "D:/PreprocessedData_MCD"      # MCD-rPPG: BVP + SpO2 (8000 chunks)
   FS:           30
   CHUNK_LENGTH: 128
   LABEL_TYPE:   "DiffNormalized"
@@ -38,12 +35,10 @@ RPPG_DATA:
   RESIZE_H:     72
   DO_PREPROCESS: false
 
-  # 測試集：PURE，有 BVP + SpO2，評估兩者
-  TEST_DATASET:      "PURE"
-  TEST_DATA_PATH:    ""
-  TEST_CACHED_PATH:  ""
-  TEST_CACHED_PATHS:
-    - "D:/PreprocessedData"          # PURE: BVP + SpO2
+  TEST_DATASET:     ""
+  TEST_DATA_PATH:   ""
+  TEST_CACHED_PATH: ""
+  TEST_CACHED_PATHS: []
 
   TRAIN_BEGIN: 0.0
   TRAIN_END:   0.8
@@ -59,11 +54,20 @@ RPPG_TRAIN:
 RPPG_SPO2_FINETUNE:
   EPOCHS:    60
   PATIENCE:  15
-  LR:        2.0e-5   # 保守學習率：只微調 spo2_branch + spo2_fusion_head
+  LR:        2.0e-5
+  LAMBDA_SPO2:    1.0
+  LAMBDA_CONSIST: 0.5   # 一致性：擾動影片仍預測正確標籤
+  LAMBDA_DIV:     1.0   # Diversity：防止 collapse，懲罰 std(pred) < 0.3%
 
-  # hr_branch 已凍結，L_spo2 梯度不流入 PPG 路徑
-  # 只用 SpO2 MSE+MAE，不需要 LAMBDA_SPECTRAL / LAMBDA_UNSUP
-  LAMBDA_SPO2: 1.0     # 訓練直接用 loss_spo2，此係數保留供 val_loss 調整
+  # PURE: 獨立測試集（不參與訓練）
+  PURE_PATH: "D:/PreprocessedData"
+  PURE_TRAIN_SUBJECTS: []
+  PURE_TEST_SUBJECTS:  ["01","02","03","04","05","06","07","08","09","10"]
+
+  # 取得 VIPL-HR 後填入（84-99% SpO2，107 受試者）
+  # VIPL_PATH: "D:/PreprocessedData_VIPL"
+  # VIPL_TRAIN_SUBJECTS: [...]
+  # VIPL_TEST_SUBJECTS:  [...]
 
 OUTPUT:
   CHECKPOINT_DIR: "checkpoints/rppg_spo2_finetune"

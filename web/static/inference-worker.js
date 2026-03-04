@@ -44,6 +44,17 @@ self.onmessage = async (e) => {
     return;
   }
 
+  if (msg.type === 'reset') {
+    bufWriteIdx        = 0;
+    bufFilled          = 0;
+    totalFrames        = 0;
+    firstPredictionDone = false;
+    hrSmoothed         = 0;
+    spo2Smoothed       = 0;
+    self.postMessage({ type: 'buffer', filled: 0, total: BUFFER_SIZE });
+    return;
+  }
+
   if (msg.type === 'frame') {
     // RGBA Uint8 → RGB Float32 into circular buffer
     const rgba  = msg.rgba;          // Uint8ClampedArray or Uint8Array

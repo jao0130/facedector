@@ -5,6 +5,7 @@ import { FaceLandmarker, FilesetResolver } from
 const INPUT_SIZE      = 72;
 const LARGE_BOX_COEF  = 1.5;
 const FACE_THRESHOLD  = 0.4;
+const FACE_TIMEOUT_MS = 5000;   // 無臉超過此時間則重置 buffer
 const MODEL_URL       = 'models/rppg_fcatt_v3.onnx';
 const ORT_WASM        = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/';
 const MP_WASM         = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
@@ -44,6 +45,7 @@ let bufTotal       = 128;
 let fpsCount       = 0;
 let fpsLast        = performance.now();
 let lastProcessed  = 0;
+let lastFaceTime   = 0;   // timestamp of last frame with a face (0 = never)
 
 // ── PPG display buffer ────────────────────────────────────────────────────────
 const PPG_BUFFER_LEN = 300;                        // 10 秒 @ 30 Hz
@@ -428,18 +430,18 @@ function updateUI(face) {
   else if (fill < 100) bufferBar.style.background = 'var(--accent-cyan)';
   else bufferBar.style.background = 'var(--accent-green)';
 
-  // Vitals
-  const hr = latestVitals.hr_bpm;
+  // Vitals — 無臉時顯示 --
+  const hr = face ? latestVitals.hr_bpm : 0;
   hrValue.textContent  = hr > 0 ? Math.round(hr) : '--';
   ppgBpmEl.textContent = hr > 0 ? `${Math.round(hr)} BPM` : '-- BPM';
 
-  const spo2 = latestVitals.spo2;
+  const spo2 = face ? latestVitals.spo2 : 0;
   spo2Value.textContent = spo2 > 0 ? spo2.toFixed(1) : '--';
   if (spo2 > 0 && spo2 < 95) cardSpo2.classList.add('alert');
   else cardSpo2.classList.remove('alert');
 
   // Signal quality
-  const snr = latestVitals.snr ?? 0;
+  const snr = face ? (latestVitals.snr ?? 0) : 0;
   if (snr > 0) {
     const label = snr >= 60 ? 'GOOD' : snr >= 30 ? 'FAIR' : 'POOR';
     qualityValue.textContent = `${snr}% · ${label}`;
@@ -497,6 +499,17 @@ function mainLoop(timestamp) {
   lastProcessed = timestamp;
 
   const face = detectFace(timestamp);
+
+  if (face) {
+    lastFaceTime = timestamp;
+  } else if (lastFaceTime > 0 && timestamp - lastFaceTime > FACE_TIMEOUT_MS) {
+    // 無臉超過 5 秒：重置 worker buffer 並清除舊數值
+    worker.postMessage({ type: 'reset' });
+    bufFilled    = 0;
+    lastFaceTime = 0;
+    latestVitals = { hr_bpm: 0, spo2: 0, snr: 0 };
+  }
+
   drawOverlay(face);
   drawPPG();
   drawTrend();

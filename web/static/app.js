@@ -39,7 +39,7 @@ const recordBtn    = document.getElementById('record-btn');
 let faceLandmarker = null;
 let worker         = null;
 let workerReady    = false;
-let latestVitals   = { hr_bpm: 0, spo2: 0, snr: 0 };
+let latestVitals   = { hr_bpm: 0, spo2: 0, quality: 0 };
 let bufFilled      = 0;
 let bufTotal       = 128;
 let fpsCount       = 0;
@@ -114,8 +114,8 @@ function initWorker() {
         console.log('[VitalSense] Inference worker ready.');
         resolve();
       } else if (msg.type === 'result') {
-        latestVitals = { hr_bpm: msg.hr_bpm, spo2: msg.spo2, snr: msg.snr ?? 0 };
-        console.log(`[VitalSense] HR=${msg.hr_bpm} BPM, SpO2=${msg.spo2}% SNR=${msg.snr}%`);
+        latestVitals = { hr_bpm: msg.hr_bpm, spo2: msg.spo2, quality: msg.quality ?? 0 };
+        console.log(`[VitalSense] HR=${msg.hr_bpm} BPM, SpO2=${msg.spo2}% Quality=${msg.quality}%`);
         if (msg.ppg_wave) {
           for (const v of msg.ppg_wave) {
             ppgBuffer[ppgWriteIdx % PPG_BUFFER_LEN] = v;
@@ -134,7 +134,7 @@ function initWorker() {
             timestamp: new Date().toISOString(),
             hr:        msg.hr_bpm,
             spo2:      msg.spo2,
-            quality:   msg.snr ?? 0,
+            quality:   msg.quality ?? 0,
           });
         }
       } else if (msg.type === 'buffer') {
@@ -441,7 +441,7 @@ function updateUI(face) {
   else cardSpo2.classList.remove('alert');
 
   // Signal quality
-  const snr = face ? (latestVitals.snr ?? 0) : 0;
+  const snr = face ? (latestVitals.quality ?? 0) : 0;
   if (snr > 0) {
     const label = snr >= 60 ? 'GOOD' : snr >= 30 ? 'FAIR' : 'POOR';
     qualityValue.textContent = `${snr}% · ${label}`;
@@ -507,7 +507,7 @@ function mainLoop(timestamp) {
     worker.postMessage({ type: 'reset' });
     bufFilled    = 0;
     lastFaceTime = 0;
-    latestVitals = { hr_bpm: 0, spo2: 0, snr: 0 };
+    latestVitals = { hr_bpm: 0, spo2: 0, quality: 0 };
   }
 
   drawOverlay(face);

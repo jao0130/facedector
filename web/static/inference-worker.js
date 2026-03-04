@@ -102,16 +102,17 @@ self.onmessage = async (e) => {
       const rppgWave = waveOut.data;
       const spo2Raw  = spo2Out.data[0];
 
-      const { hr: hrRaw, snr } = estimateHR(rppgWave, 30);
-      const hr       = smoothHR(hrRaw);
-      const spo2     = smoothSpo2((isNaN(spo2Raw) || spo2Raw === 0) ? 0 : Math.max(85, Math.min(100, spo2Raw)));
+      const hrRaw     = estimateHR(rppgWave, 30);
+      const hr        = smoothHR(hrRaw);
+      const spo2      = smoothSpo2((isNaN(spo2Raw) || spo2Raw === 0) ? 0 : Math.max(85, Math.min(100, spo2Raw)));
       const cleanWave = harmonicReconstruct(rppgWave, hr, 30);
+      const quality   = signalQuality(rppgWave, cleanWave);
 
       self.postMessage({
         type:     'result',
         hr_bpm:   Math.round(hr * 10) / 10,
         spo2:     Math.round(spo2 * 10) / 10,
-        snr:      snr,
+        quality:  quality,
         ppg_wave: cleanWave.slice(-PREDICT_EVERY),  // 最新 30 samples，諧波重建後
       });
     } catch (err) {
@@ -190,19 +191,25 @@ function estimateHR(signal, fs) {
     }
   }
 
-  // Signal quality: peak power vs mean band power, self-calibrated to bin count
-  // snrRatio=1 → uniform noise (0%), snrRatio=numBins → all power in peak (100%)
-  let totalPower = 0, numBins = 0;
-  for (let k = 0; k < K; k++) {
-    if (mags[k] > 0) { totalPower += mags[k]; numBins++; }
-  }
-  const meanPower = totalPower / Math.max(numBins, 1);
-  const snrRatio  = maxMag / Math.max(meanPower, 1e-10);
-  const snr = Math.round(Math.min(100, Math.max(0,
-    (snrRatio - 1) / Math.max(numBins - 1, 1) * 100
-  )));
+  return peakFreq * 60;
+}
 
-  return { hr: peakFreq * 60, snr };
+// ── Signal Quality（Pearson 相關係數）─────────────────────────────────────────
+// 計算原始 rPPG 波形與諧波重建波形的皮爾森相關係數（0–100%）。
+// 諧波重建只保留心率頻率成分，相關性高代表信號確實「長得像心跳」；
+// 若運動假影恰好同頻，波形形狀仍會偏離諧波模型，相關性會下降。
+function signalQuality(raw, reconstructed) {
+  const N = raw.length;
+  let sumR = 0, sumC = 0;
+  for (let i = 0; i < N; i++) { sumR += raw[i]; sumC += reconstructed[i]; }
+  const mR = sumR / N, mC = sumC / N;
+  let num = 0, dR = 0, dC = 0;
+  for (let i = 0; i < N; i++) {
+    const r = raw[i] - mR, c = reconstructed[i] - mC;
+    num += r * c; dR += r * r; dC += c * c;
+  }
+  const corr = num / Math.sqrt(dR * dC + 1e-10);   // -1 ~ +1
+  return Math.round(Math.max(0, corr) * 100);        // 0 ~ 100%
 }
 
 // ── Harmonic Waveform Reconstruction ─────────────────────────────────────────
